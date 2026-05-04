@@ -1,0 +1,168 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gradient-to-br from-gray-50/80 via-white to-purple-50/60 text-gray-900;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+      'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold tracking-tight text-gray-900;
+  }
+}
+
+@layer components {
+  /* Glass morphism effects - Light theme (reduced brightness 20%) */
+  .glass {
+    @apply bg-white/65 backdrop-blur-xl border border-gray-200/40 shadow-xl;
+  }
+  
+  .glass-strong {
+    @apply bg-white/70 backdrop-blur-2xl border border-gray-200/50 shadow-2xl;
+  }
+  
+  .glass-subtle {
+    @apply bg-white/50 backdrop-blur-lg border border-gray-100/80;
+  }
+  
+  /* Gradient text */
+  .gradient-text {
+    @apply bg-gradient-to-r from-purple-600 via-blue-600 to-cyan-600 bg-clip-text text-transparent;
+  }
+  
+  .gradient-text-accent {
+    @apply bg-gradient-to-r from-purple-600 via-pink-600 to-rose-600 bg-clip-text text-transparent;
+  }
+  
+  /* Card styles */
+  .card {
+    @apply glass rounded-2xl p-6 transition-all duration-300;
+  }
+  
+  .card-hover {
+    @apply hover:scale-[1.02] hover:border-purple-300 transition-all duration-300;
+  }
+  
+  .card-hover:hover {
+    box-shadow: 0 10px 30px rgba(139, 92, 246, 0.15);
+  }
+  
+  .card-interactive {
+    @apply card card-hover cursor-pointer active:scale-[0.98];
+  }
+  
+  /* Button styles */
+  .btn {
+    @apply px-6 py-3 rounded-xl font-semibold transition-all duration-200 
+           disabled:opacity-50 disabled:cursor-not-allowed
+           focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white;
+  }
+  
+  .btn-primary {
+    @apply btn bg-gradient-to-r from-purple-600 via-blue-600 to-cyan-600 
+           text-white shadow-lg hover:scale-105
+           active:scale-95 focus:ring-purple-500;
+  }
+  
+  .btn-primary:hover {
+    box-shadow: 0 10px 30px rgba(139, 92, 246, 0.4);
+  }
+  
+  .btn-secondary {
+    @apply btn bg-gray-100 text-gray-700 border border-gray-300
+           hover:bg-gray-200 hover:border-gray-400 focus:ring-gray-400;
+  }
+  
+  .btn-success {
+    @apply btn bg-gradient-to-r from-green-600 to-emerald-600
+           text-white shadow-lg hover:shadow-green-500/50 hover:scale-105
+           active:scale-95 focus:ring-green-500;
+  }
+  
+  /* Input styles */
+  .input {
+    @apply w-full px-4 py-3 bg-white border border-gray-300 rounded-xl
+           text-gray-900 placeholder-gray-400 shadow-sm
+           focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500
+           transition-all duration-200;
+  }
+  
+  /* Badge styles */
+  .badge {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-sm font-medium;
+  }
+  
+  .badge-primary {
+    @apply badge bg-purple-100 text-purple-700 border border-purple-200;
+  }
+  
+  .badge-success {
+    @apply badge bg-green-100 text-green-700 border border-green-200;
+  }
+  
+  .badge-info {
+    @apply badge bg-blue-100 text-blue-700 border border-blue-200;
+  }
+}
+
+@layer utilities {
+  /* Text utilities */
+  .text-balance {
+    text-wrap: balance;
+  }
+  
+  /* Animation utilities */
+  .animate-shimmer {
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(139, 92, 246, 0.1),
+      transparent
+    );
+    background-size: 1000px 100%;
+    animation: shimmer 2s linear infinite;
+  }
+  
+  /* Glow effects */
+  .glow-purple {
+    box-shadow: 0 10px 30px rgba(139, 92, 246, 0.2);
+  }
+  
+  .glow-cyan {
+    box-shadow: 0 10px 30px rgba(6, 182, 212, 0.2);
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-100 rounded-full;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gradient-to-b from-purple-400 to-blue-500 rounded-full;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply from-purple-500 to-blue-600;
+}
+
+/* Selection */
+::selection {
+  @apply bg-purple-200 text-purple-900;
+}

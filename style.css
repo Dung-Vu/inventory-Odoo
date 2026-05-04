@@ -1,0 +1,256 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    padding: 20px;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+    padding: 30px;
+}
+
+header h1 {
+    color: #333;
+    text-align: center;
+    margin-bottom: 30px;
+    font-size: 2em;
+}
+
+.search-section {
+    margin-bottom: 30px;
+}
+
+.input-group {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.input-group label {
+    font-weight: 600;
+    color: #555;
+    min-width: 120px;
+}
+
+.input-group input {
+    flex: 1;
+    padding: 12px 15px;
+    border: 2px solid #ddd;
+    border-radius: 5px;
+    font-size: 16px;
+    min-width: 200px;
+}
+
+.input-group input:focus {
+    outline: none;
+    border-color: #667eea;
+}
+
+button {
+    padding: 12px 25px;
+    background: #667eea;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 600;
+    transition: background 0.3s;
+}
+
+button:hover {
+    background: #5568d3;
+}
+
+button:active {
+    transform: scale(0.98);
+}
+
+.loading {
+    text-align: center;
+    padding: 20px;
+    color: #667eea;
+    font-size: 18px;
+}
+
+.error {
+    background: #fee;
+    color: #c33;
+    padding: 15px;
+    border-radius: 5px;
+    margin: 20px 0;
+    border-left: 4px solid #c33;
+}
+
+.picking-info {
+    background: #f8f9fa;
+    padding: 20px;
+    border-radius: 5px;
+    margin-bottom: 30px;
+}
+
+.picking-info h2 {
+    color: #333;
+    margin-bottom: 15px;
+}
+
+.info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 15px;
+}
+
+.info-grid div {
+    padding: 10px;
+    background: white;
+    border-radius: 5px;
+}
+
+.info-grid strong {
+    color: #667eea;
+    margin-right: 5px;
+}
+
+.products-section {
+    margin-top: 30px;
+}
+
+.products-section h2 {
+    color: #333;
+    margin-bottom: 20px;
+}
+
+.products-list {
+    display: grid;
+    gap: 20px;
+}
+
+.product-card {
+    background: #f8f9fa;
+    border: 2px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 20px;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.product-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+}
+
+.product-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.product-name {
+    font-size: 1.2em;
+    font-weight: 600;
+    color: #333;
+}
+
+.product-quantity {
+    background: #667eea;
+    color: white;
+    padding: 5px 15px;
+    border-radius: 20px;
+    font-weight: 600;
+}
+
+.product-details {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.product-details div {
+    padding: 8px;
+    background: white;
+    border-radius: 5px;
+}
+
+.product-details strong {
+    color: #667eea;
+    margin-right: 5px;
+}
+
+.lots-list {
+    margin-top: 15px;
+}
+
+.lots-list h4 {
+    color: #555;
+    margin-bottom: 10px;
+}
+
+.lot-item {
+    background: white;
+    padding: 10px;
+    margin: 5px 0;
+    border-radius: 5px;
+    border-left: 3px solid #667eea;
+}
+
+.lot-item strong {
+    color: #667eea;
+}
+
+.actions {
+    margin-top: 30px;
+    text-align: center;
+}
+
+.btn-primary {
+    background: #28a745;
+    padding: 15px 40px;
+    font-size: 18px;
+}
+
+.btn-primary:hover {
+    background: #218838;
+}
+
+.btn-print {
+    background: #17a2b8;
+    margin-top: 10px;
+}
+
+.btn-print:hover {
+    background: #138496;
+}
+
+@media print {
+    body {
+        background: white;
+        padding: 0;
+    }
+    
+    .container {
+        box-shadow: none;
+    }
+    
+    .search-section,
+    .picking-info,
+    .products-section h2,
+    .actions,
+    button {
+        display: none;
+    }
+}
