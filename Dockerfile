@@ -30,8 +30,8 @@ RUN npm ci --only=production
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server ./server
 
-# Copy .env file
-COPY server/.env ./server/.env
+# Copy .env file (root level)
+COPY .env ./server/.env
 
 # Expose port
 EXPOSE 5003

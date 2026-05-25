@@ -2,6 +2,9 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import HomePage from './pages/HomePage'
 import RecipientInfoPage from './pages/RecipientInfoPage'
 import ABCAnalysisPage from './pages/ABCAnalysisPage'
+import QcSearchPage from './pages/QcSearchPage'
+import QcListPage from './pages/QcListPage'
+import QcDetailPage from './pages/QcDetailPage'
 
 function App() {
   return (
@@ -27,6 +30,9 @@ function App() {
             />
           }
         />
+        <Route path="/qc-search" element={<QcSearchPage />} />
+        <Route path="/qc-list" element={<QcListPage />} />
+        <Route path="/qc-detail/:id" element={<QcDetailPage />} />
       </Routes>
     </Router>
   )

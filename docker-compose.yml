@@ -8,10 +8,12 @@ services:
     ports:
       - "5003:5003"
     env_file:
-      - ./server/.env
+      - ./.env
     environment:
       - NODE_ENV=production
       - PORT=5003
+    volumes:
+      - qc_data:/app/server/data
     networks:
       - app-network
       - tunnel-master_tunnel-net
@@ -21,6 +23,10 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+volumes:
+  qc_data:
+    driver: local
 
 networks:
   app-network:

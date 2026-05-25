@@ -91,6 +91,13 @@ export default function HomePage() {
               <span className="text-xl">🧵</span>
               <span>Báo Cáo Doanh Số Vải</span>
             </Link>
+            <Link
+              to="/qc-search"
+              className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-xl hover:from-orange-600 hover:to-red-600 transition-all shadow-lg hover:shadow-xl"
+            >
+              <span className="text-xl">🔍</span>
+              <span>QC List</span>
+            </Link>
           </div>
         </motion.header>
 

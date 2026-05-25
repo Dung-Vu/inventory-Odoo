@@ -30,6 +30,7 @@ console.log(`Loading env from: ${envPath}`)
 import express from 'express'
 import cors from 'cors'
 import apiRoutes from './routes/api.js'
+import qcRoutes from './routes/qc.js'
 
 // Log loaded env vars (without sensitive data)
 console.log('Environment variables loaded:')
@@ -72,6 +73,7 @@ app.get('/health', (req, res) => {
 
 // API routes
 app.use('/api', apiRoutes)
+app.use('/api', qcRoutes)
 
 // Serve index.html for all other routes in production (SPA routing)
 if (isProduction) {

@@ -135,7 +135,7 @@ export default function ProductsList({ products, picking }) {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
           {filteredProducts.map((product, index) => (
             <motion.div
-              key={product.product_id}
+              key={`${product.product_id}-${index}-${product.product_name}`}
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: index * 0.1, duration: 0.3 }}

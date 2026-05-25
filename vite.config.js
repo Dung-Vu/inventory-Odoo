@@ -9,7 +9,7 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       host: '0.0.0.0', // Cho phép truy cập từ mạng nội bộ
-      port: 3001,
+      port: 3010,
       open: true,
       strictPort: false, // Cho phép tự động chọn port khác nếu 3001 bị chiếm
       proxy: {
