@@ -34,7 +34,7 @@ import express from 'express'
 import cors from 'cors'
 import apiRoutes from './routes/api.js'
 import qcRoutes from './routes/qc.js'
-import generateLotsRoutes from './routes/generate-lots.js'
+import generateLotsRoutes, { reconcileDoneMoRepairs } from './routes/generate-lots.js'
 
 // Log loaded env vars (without sensitive data)
 console.log('Environment variables loaded:')
@@ -106,4 +106,13 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Backend server running on http://localhost:${PORT}`)
   console.log(`📡 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`)
   console.log(`🔗 Odoo URL: ${process.env.ODOO_URL || 'Not configured'}`)
+
+  const reconcile = () => {
+    reconcileDoneMoRepairs().catch((error) => {
+      console.error('[LotRepair] reconciliation failed:', error.message)
+    })
+  }
+  setTimeout(reconcile, 5000)
+  const repairTimer = setInterval(reconcile, 60000)
+  repairTimer.unref()
 })

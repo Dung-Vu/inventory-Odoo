@@ -55,6 +55,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_qc_batches_created ON qc_batches(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_qc_items_batch ON qc_items(batch_id);
   CREATE INDEX IF NOT EXISTS idx_qc_items_status ON qc_items(qc_status);
+
+  CREATE TABLE IF NOT EXISTS lot_done_mo_repairs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    picking_id INTEGER NOT NULL,
+    picking_name TEXT NOT NULL,
+    receipt_move_id INTEGER NOT NULL,
+    receipt_move_line_id INTEGER NOT NULL,
+    finished_move_id INTEGER NOT NULL,
+    production_id INTEGER NOT NULL,
+    product_id INTEGER NOT NULL,
+    lot_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'preparing',
+    error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(picking_id, receipt_move_id, finished_move_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_lot_done_mo_repairs_status
+    ON lot_done_mo_repairs(status, picking_id);
 `);
 
 // ============ BATCH CRUD ============
@@ -193,6 +213,55 @@ export function recalcBatchStatus(batchId) {
   `).run(overall, batchId);
 
   return overall;
+}
+
+// ============ DONE SUBCONTRACT MO RECEIPT REPAIRS ============
+
+export function saveDoneMoRepair(data) {
+  db.prepare(`
+    INSERT INTO lot_done_mo_repairs (
+      picking_id, picking_name, receipt_move_id, receipt_move_line_id,
+      finished_move_id, production_id, product_id, lot_id, status, error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+    ON CONFLICT(picking_id, receipt_move_id, finished_move_id) DO UPDATE SET
+      receipt_move_line_id = excluded.receipt_move_line_id,
+      production_id = excluded.production_id,
+      product_id = excluded.product_id,
+      lot_id = excluded.lot_id,
+      status = excluded.status,
+      error = NULL,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    data.picking_id,
+    data.picking_name,
+    data.receipt_move_id,
+    data.receipt_move_line_id,
+    data.finished_move_id,
+    data.production_id,
+    data.product_id,
+    data.lot_id,
+    data.status || 'preparing'
+  );
+  return db.prepare(`
+    SELECT * FROM lot_done_mo_repairs
+    WHERE picking_id = ? AND receipt_move_id = ? AND finished_move_id = ?
+  `).get(data.picking_id, data.receipt_move_id, data.finished_move_id);
+}
+
+export function updateDoneMoRepairStatus(id, status, error = null) {
+  return db.prepare(`
+    UPDATE lot_done_mo_repairs
+    SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(status, error, id);
+}
+
+export function listPendingDoneMoRepairs() {
+  return db.prepare(`
+    SELECT * FROM lot_done_mo_repairs
+    WHERE status IN ('preparing', 'prepared')
+    ORDER BY id
+  `).all();
 }
 
 // ============ STATS ============

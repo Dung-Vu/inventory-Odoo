@@ -49,7 +49,11 @@ export default function GenerateLotsPage() {
       const data = await previewLots(pickingName.trim())
       setPreviewData(data)
       setPreviewInput(pickingName.trim())
-      if (data.can_apply && data.total_to_rename > 0) {
+      if (data.can_apply && data.total_done_mos_to_prepare > 0) {
+        toast.success(
+          `Sẽ chuẩn hóa serial và chuẩn bị ${data.total_done_mos_to_prepare} MO đã Done để phiếu có thể Validate`
+        )
+      } else if (data.can_apply && data.total_to_rename > 0) {
         toast.success(
           `Sẽ chuẩn hóa tên ${data.total_to_rename} lot nguồn MO và gán ${data.total_to_assign} serial`
         )
@@ -88,7 +92,9 @@ export default function GenerateLotsPage() {
         )
       } else {
         toast.success(
-          `Đã tạo ${data.total_created} lot mới, đổi tên ${data.total_renamed || 0} lot nguồn và gán ${data.total_assigned} serial`
+          data.total_prepared_done_mos > 0
+            ? `Đã chuẩn bị ${data.total_prepared_done_mos} MO Done. Qua Odoo refresh và Validate phiếu.`
+            : `Đã tạo ${data.total_created} lot mới, đổi tên ${data.total_renamed || 0} lot nguồn và gán ${data.total_assigned} serial`
         )
       }
     } catch (err) {
@@ -291,7 +297,8 @@ export default function GenerateLotsPage() {
                   </h3>
                   <p className="text-sm text-gray-600">
                     Hành động này sẽ tạo <strong>{previewData?.total_to_create || 0}</strong> lot mới,
-                    chuẩn hóa tên <strong>{previewData?.total_to_rename || 0}</strong> lot nguồn MO và gán{' '}
+                    chuẩn hóa tên <strong>{previewData?.total_to_rename || 0}</strong> lot nguồn MO,
+                    chuẩn bị <strong>{previewData?.total_done_mos_to_prepare || 0}</strong> MO đã Done và gán{' '}
                     <strong>{previewData?.total_to_assign || 0}</strong> serial vào Detail của
                     <strong> {previewData?.picking?.name}</strong>. Không tự Validate phiếu.
                   </p>
@@ -449,8 +456,8 @@ function ResultSummary({ data, isPreview }) {
         {isPreview ? (
           <StatCard
             icon={PackageCheck}
-            label="Lot nguồn đổi tên"
-            value={data.total_to_rename || 0}
+            label={data.total_done_mos_to_prepare > 0 ? 'MO Done sẽ chuẩn bị' : 'Lot nguồn đổi tên'}
+            value={data.total_done_mos_to_prepare || data.total_to_rename || 0}
             color="emerald"
           />
         ) : (
@@ -537,6 +544,14 @@ function ProductResultCard({ product, isPreview }) {
                 {lot.sequence != null && (
                   <span className="text-emerald-500 text-xs">
                     #{String(lot.sequence).padStart(3, '0')}
+                  </span>
+                )}
+                {lot.prepare_done_mo && (
+                  <span
+                    className="ml-1 text-[10px] text-violet-700 bg-violet-100 rounded px-1"
+                    title="Hệ thống sẽ chuẩn bị nhận serial đã sản xuất và tự khôi phục liên kết MO sau Validate"
+                  >
+                    chuẩn bị MO Done
                   </span>
                 )}
                 {lot.existing_source_lot && (

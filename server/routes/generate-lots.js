@@ -1,6 +1,11 @@
 import crypto from "crypto";
 import express from "express";
 import { callOdooAPI, getOdooConfig } from "../odoo-helper.js";
+import {
+  listPendingDoneMoRepairs,
+  saveDoneMoRepair,
+  updateDoneMoRepairStatus,
+} from "../db.js";
 
 const router = express.Router();
 const RECEIPT_TYPE_CODE = "incoming";
@@ -68,14 +73,23 @@ function pickingSummary(picking) {
   };
 }
 
-function planHash(pickingId, lots) {
-  const body = lots
+function planHash(pickingId, lots, repairs = []) {
+  const lotBody = lots
     .map(
       (lot) =>
         `${lot.move_line_id}:${lot.product_id}:${lot.name}:${lot.id || "new"}:${lot.previous_name || ""}:${lot.subcontract_mo_id || ""}`
     )
     .join("|");
-  return crypto.createHash("sha256").update(`${pickingId}|${body}`).digest("hex");
+  const repairBody = repairs
+    .map(
+      (repair) =>
+        `${repair.receipt_move_id}:${repair.move_line_id}:${repair.finished_move_id}:${repair.subcontract_mo_id}:${repair.lot_id}:${repair.lot_name}`
+    )
+    .join("|");
+  return crypto
+    .createHash("sha256")
+    .update(`${pickingId}|${lotBody}|${repairBody}`)
+    .digest("hex");
 }
 
 export async function resolveSourceDocumentCode(picking, call) {
@@ -216,7 +230,11 @@ export async function collectSerialTargets(pickingId, pickingCompanyId, call) {
     const invalidLines = lineDetails.filter((detail) => !isOneUnit(detail.quantity));
     const plannableLines = lineDetails
       .filter((detail) => !detail.hasLot && isOneUnit(detail.quantity))
-      .map(({ line, quantity }) => ({ id: line.id, quantity }));
+      .map(({ line, quantity }) => ({
+        id: line.id,
+        move_id: toId(line.move_id),
+        quantity,
+      }));
 
     if (!lines.length && expectedQty > 0) {
       blockingIssues.push({
@@ -256,6 +274,7 @@ export async function collectSerialTargets(pickingId, pickingCompanyId, call) {
       invalid_lines: invalidLines.map(({ line, quantity }) => ({ id: line.id, quantity })),
       move_lines: lines.map((line) => ({
         id: line.id,
+        move_id: toId(line.move_id),
         qty: moveLineQuantity(line),
         lot_id: toId(line.lot_id) || null,
         lot_name: line.lot_name || null,
@@ -279,14 +298,26 @@ export async function resolveSubcontractAssignments(pickingId, products, call) {
       product.is_subcontract &&
       (product.move_lines?.length || product.plannable_lines?.length)
   );
-  if (!serialProducts.length) return { byMoveLine: new Map(), blockingIssues: [] };
+  if (!serialProducts.length) {
+    return { byMoveLine: new Map(), blockingIssues: [], doneMoRepairs: [] };
+  }
 
   const productIds = serialProducts.map((product) => product.product_id);
   const sourceMOs = await call(
     "mrp.production",
     "search_read",
     [["incoming_picking", "=", pickingId], ["product_id", "in", productIds]],
-    ["id", "name", "state", "product_id", "product_qty", "lot_producing_ids"]
+    [
+      "id",
+      "name",
+      "state",
+      "product_id",
+      "product_qty",
+      "qty_produced",
+      "lot_producing_ids",
+      "move_finished_ids",
+      "finished_move_line_ids",
+    ]
   );
   const sourceLotIds = [
     ...new Set(sourceMOs.flatMap((mo) => mo.lot_producing_ids || []).filter(Boolean)),
@@ -297,6 +328,7 @@ export async function resolveSubcontractAssignments(pickingId, products, call) {
   const lotById = new Map(sourceLots.map((lot) => [lot.id, lot]));
   const byMoveLine = new Map();
   const blockingIssues = [];
+  const doneMoRepairs = [];
 
   for (const product of serialProducts) {
     const plannableLines = product.plannable_lines || [];
@@ -304,23 +336,23 @@ export async function resolveSubcontractAssignments(pickingId, products, call) {
     const productMOs = sourceMOs
       .filter((mo) => toId(mo.product_id) === product.product_id)
       .sort((left, right) => left.id - right.id);
-    const doneMOs = productMOs.filter((mo) => mo.state === "done");
-    if (doneMOs.length) {
-      blockingIssues.push({
-        product_id: product.product_id,
-        product_name: product.product_name,
-        code: "subcontract_source_mo_already_done",
-        message: `Subcontracting MO ${doneMOs.map((mo) => mo.name).join(", ")} đã Done và serial đã được sản xuất. Không được Apply: Odoo sẽ báo “Serial number already produced” khi Validate phiếu nhập.`,
-      });
-      continue;
-    }
-
-    const mos = productMOs.filter((mo) => ["confirmed", "progress", "to_close"].includes(mo.state));
-    const invalidQuantity = mos.filter((mo) => !isOneUnit(mo.product_qty));
-    const ambiguous =
-      productMOs.length !== mos.length ||
-      mos.some((mo) => (mo.lot_producing_ids || []).length > 1);
-    if (invalidQuantity.length || mos.length !== receiptLines.length || ambiguous) {
+    const allowedMOs = productMOs.filter((mo) =>
+      ["confirmed", "progress", "to_close", "done"].includes(mo.state)
+    );
+    const invalid =
+      productMOs.length !== allowedMOs.length ||
+      allowedMOs.length !== receiptLines.length ||
+      allowedMOs.some(
+        (mo) =>
+          !isOneUnit(mo.product_qty) ||
+          (mo.lot_producing_ids || []).length > 1 ||
+          (mo.state === "done" &&
+            (!isOneUnit(mo.qty_produced) ||
+              (mo.lot_producing_ids || []).length !== 1 ||
+              (mo.move_finished_ids || []).length !== 1 ||
+              (mo.finished_move_line_ids || []).length !== 1))
+      );
+    if (invalid) {
       blockingIssues.push({
         product_id: product.product_id,
         product_name: product.product_name,
@@ -331,7 +363,8 @@ export async function resolveSubcontractAssignments(pickingId, products, call) {
       continue;
     }
 
-    const unmatchedMOs = [...mos];
+    const unmatchedMOs = [...allowedMOs];
+    const pairs = [];
     let mappingFailed = false;
     for (const line of receiptLines.filter((item) => item.lot_id)) {
       const index = unmatchedMOs.findIndex(
@@ -341,9 +374,18 @@ export async function resolveSubcontractAssignments(pickingId, products, call) {
         mappingFailed = true;
         break;
       }
+      pairs.push({ line, mo: unmatchedMOs[index] });
       unmatchedMOs.splice(index, 1);
     }
-    if (mappingFailed || unmatchedMOs.length !== plannableLines.length) {
+    for (const line of plannableLines) {
+      const mo = unmatchedMOs.shift();
+      if (!mo) {
+        mappingFailed = true;
+        break;
+      }
+      pairs.push({ line, mo });
+    }
+    if (mappingFailed || unmatchedMOs.length || pairs.length !== receiptLines.length) {
       blockingIssues.push({
         product_id: product.product_id,
         product_name: product.product_name,
@@ -354,20 +396,36 @@ export async function resolveSubcontractAssignments(pickingId, products, call) {
       continue;
     }
 
-    plannableLines.forEach((line, index) => {
-      const mo = unmatchedMOs[index];
+    for (const { line, mo } of pairs) {
       const lotId = mo.lot_producing_ids?.[0] || null;
       const lot = lotId ? lotById.get(lotId) : null;
-      byMoveLine.set(line.id, {
-        subcontract_mo_id: mo.id,
-        subcontract_mo_name: mo.name,
-        existing_lot_id: lotId,
-        existing_lot_name: lot?.name || null,
-      });
-    });
+      if (plannableLines.some((item) => item.id === line.id)) {
+        byMoveLine.set(line.id, {
+          subcontract_mo_id: mo.id,
+          subcontract_mo_name: mo.name,
+          existing_lot_id: lotId,
+          existing_lot_name: lot?.name || null,
+          source_mo_state: mo.state,
+        });
+      }
+      if (mo.state === "done") {
+        doneMoRepairs.push({
+          product_id: product.product_id,
+          product_name: product.product_name,
+          move_line_id: line.id,
+          receipt_move_id: line.move_id,
+          subcontract_mo_id: mo.id,
+          subcontract_mo_name: mo.name,
+          finished_move_id: mo.move_finished_ids[0],
+          finished_move_line_id: mo.finished_move_line_ids[0],
+          lot_id: lotId,
+          lot_name: lot?.name || null,
+        });
+      }
+    }
   }
 
-  return { byMoveLine, blockingIssues };
+  return { byMoveLine, blockingIssues, doneMoRepairs };
 }
 
 function escapeRegExp(value) {
@@ -611,6 +669,202 @@ export async function createAndAssignLot(item, call) {
   }
 }
 
+async function writeMoveOrigins(moveId, command, call) {
+  await call("stock.move", "write", [], {
+    positionalArgs: [[[moveId], { move_orig_ids: [command] }]],
+  });
+}
+
+function conflict(message) {
+  const error = new Error(message);
+  error.status = 409;
+  return error;
+}
+
+export async function prepareDoneMoReceiptRepair(
+  repair,
+  picking,
+  call,
+  storage = {
+    save: saveDoneMoRepair,
+    update: updateDoneMoRepairStatus,
+  }
+) {
+  const [receiptMoves, receiptLines, productions, finishedMoves, lots] = await Promise.all([
+    call("stock.move", "read", [repair.receipt_move_id], {
+      positionalArgs: [[repair.receipt_move_id]],
+      fields: [
+        "id", "state", "picked", "is_subcontract", "product_id", "quantity",
+        "purchase_line_id", "move_orig_ids", "move_line_ids", "location_id",
+        "location_dest_id",
+      ],
+    }),
+    call("stock.move.line", "read", [repair.move_line_id], {
+      positionalArgs: [[repair.move_line_id]],
+      fields: [
+        "id", "state", "picked", "picking_id", "move_id", "product_id",
+        "quantity", "lot_id", "location_id", "location_dest_id", "company_id",
+      ],
+    }),
+    call("mrp.production", "read", [repair.subcontract_mo_id], {
+      positionalArgs: [[repair.subcontract_mo_id]],
+      fields: [
+        "id", "name", "state", "product_id", "product_qty", "qty_produced",
+        "lot_producing_ids", "move_finished_ids",
+      ],
+    }),
+    call("stock.move", "read", [repair.finished_move_id], {
+      positionalArgs: [[repair.finished_move_id]],
+      fields: [
+        "id", "state", "picked", "production_id", "product_id", "quantity",
+        "move_dest_ids", "location_id", "location_dest_id",
+      ],
+    }),
+    call("stock.lot", "read", [repair.lot_id], {
+      positionalArgs: [[repair.lot_id]],
+      fields: ["id", "name", "product_id", "company_id"],
+    }),
+  ]);
+  const receiptMove = receiptMoves?.[0];
+  const receiptLine = receiptLines?.[0];
+  const production = productions?.[0];
+  const finishedMove = finishedMoves?.[0];
+  const lot = lots?.[0];
+  if (
+    !receiptMove ||
+    !receiptLine ||
+    !production ||
+    !finishedMove ||
+    !lot ||
+    picking.state === "done" ||
+    receiptMove.state !== "assigned" ||
+    receiptMove.picked ||
+    !receiptMove.is_subcontract ||
+    toId(receiptMove.product_id) !== repair.product_id ||
+    !isOneUnit(receiptMove.quantity) ||
+    !receiptMove.purchase_line_id ||
+    receiptMove.move_orig_ids?.length !== 1 ||
+    receiptMove.move_orig_ids[0] !== repair.finished_move_id ||
+    !receiptMove.move_line_ids?.includes(repair.move_line_id) ||
+    receiptLine.state !== "assigned" ||
+    receiptLine.picked ||
+    toId(receiptLine.picking_id) !== picking.id ||
+    toId(receiptLine.move_id) !== repair.receipt_move_id ||
+    toId(receiptLine.product_id) !== repair.product_id ||
+    !isOneUnit(receiptLine.quantity) ||
+    toId(receiptLine.lot_id) !== repair.lot_id ||
+    production.state !== "done" ||
+    toId(production.product_id) !== repair.product_id ||
+    !isOneUnit(production.product_qty) ||
+    !isOneUnit(production.qty_produced) ||
+    production.lot_producing_ids?.length !== 1 ||
+    production.lot_producing_ids[0] !== repair.lot_id ||
+    production.move_finished_ids?.length !== 1 ||
+    production.move_finished_ids[0] !== repair.finished_move_id ||
+    finishedMove.state !== "done" ||
+    !finishedMove.picked ||
+    toId(finishedMove.production_id) !== repair.subcontract_mo_id ||
+    toId(finishedMove.product_id) !== repair.product_id ||
+    !isOneUnit(finishedMove.quantity) ||
+    !finishedMove.move_dest_ids?.includes(repair.receipt_move_id) ||
+    lot.name !== repair.lot_name ||
+    toId(lot.product_id) !== repair.product_id ||
+    toId(lot.company_id) !== toId(receiptLine.company_id)
+  ) {
+    throw conflict("Dữ liệu MO đã Done hoặc phiếu nhập đã thay đổi. Vui lòng Preview lại.");
+  }
+
+  const sourceLocationId = toId(receiptLine.location_id);
+  const [quants, openLines] = await Promise.all([
+    call(
+      "stock.quant",
+      "search_read",
+      [
+        ["product_id", "=", repair.product_id],
+        ["lot_id", "=", repair.lot_id],
+        ["location_id", "=", sourceLocationId],
+        ["quantity", "!=", 0],
+      ],
+      ["id", "quantity", "reserved_quantity", "company_id"]
+    ),
+    call(
+      "stock.move.line",
+      "search_read",
+      [["lot_id", "=", repair.lot_id], ["state", "not in", ["done", "cancel"]]],
+      ["id", "picking_id", "move_id", "quantity", "picked"]
+    ),
+  ]);
+  if (
+    quants?.length !== 1 ||
+    !isOneUnit(quants[0].quantity) ||
+    ![0, 1].some((value) => Math.abs(asQuantity(quants[0].reserved_quantity) - value) < QTY_EPSILON) ||
+    openLines?.length !== 1 ||
+    openLines[0].id !== repair.move_line_id ||
+    toId(openLines[0].picking_id) !== picking.id ||
+    !isOneUnit(openLines[0].quantity) ||
+    openLines[0].picked
+  ) {
+    throw conflict("Tồn kho hoặc reservation của serial đã thay đổi. Không tách liên kết MO.");
+  }
+
+  const record = storage.save({
+    picking_id: picking.id,
+    picking_name: picking.name,
+    receipt_move_id: repair.receipt_move_id,
+    receipt_move_line_id: repair.move_line_id,
+    finished_move_id: repair.finished_move_id,
+    production_id: repair.subcontract_mo_id,
+    product_id: repair.product_id,
+    lot_id: repair.lot_id,
+    status: "preparing",
+  });
+  let detached = false;
+  try {
+    await writeMoveOrigins(repair.receipt_move_id, [3, repair.finished_move_id], call);
+    detached = true;
+    const [receiptAfter, finishedAfter] = await Promise.all([
+      call("stock.move", "read", [repair.receipt_move_id], {
+        positionalArgs: [[repair.receipt_move_id]],
+        fields: ["id", "state", "picked", "is_subcontract", "move_orig_ids"],
+      }),
+      call("stock.move", "read", [repair.finished_move_id], {
+        positionalArgs: [[repair.finished_move_id]],
+        fields: ["id", "state", "production_id", "move_dest_ids"],
+      }),
+    ]);
+    if (
+      receiptAfter?.[0]?.state !== "assigned" ||
+      receiptAfter[0].picked ||
+      !receiptAfter[0].is_subcontract ||
+      receiptAfter[0].move_orig_ids?.length ||
+      finishedAfter?.[0]?.state !== "done" ||
+      toId(finishedAfter[0].production_id) !== repair.subcontract_mo_id ||
+      finishedAfter[0].move_dest_ids?.includes(repair.receipt_move_id)
+    ) {
+      throw conflict("Không xác nhận được việc tách tạm liên kết MO an toàn.");
+    }
+    storage.update(record.id, "prepared");
+    return { ...repair, repair_id: record.id, prepared: true };
+  } catch (error) {
+    if (detached) {
+      try {
+        await writeMoveOrigins(repair.receipt_move_id, [4, repair.finished_move_id], call);
+      } catch (rollbackError) {
+        storage.update(
+          record.id,
+          "failed",
+          `${error.message}; rollback lỗi: ${rollbackError.message}`
+        );
+        throw new Error(
+          `Tách liên kết MO lỗi (${error.message}); rollback cũng lỗi (${rollbackError.message}).`
+        );
+      }
+    }
+    storage.update(record.id, "failed", error.message);
+    throw error;
+  }
+}
+
 async function verifyAssignments(items, call) {
   if (!items.length) return new Set();
   const rows = await call(
@@ -627,6 +881,113 @@ async function verifyAssignments(items, call) {
     if (lotName === item.name) verified.add(item.move_line_id);
   }
   return verified;
+}
+
+let reconcilingDoneMoRepairs = false;
+
+export async function reconcileDoneMoRepairs(call = callOdooAPI) {
+  if (reconcilingDoneMoRepairs) return { checked: 0, relinked: 0 };
+  reconcilingDoneMoRepairs = true;
+  let checked = 0;
+  let relinked = 0;
+  try {
+    for (const repair of listPendingDoneMoRepairs()) {
+      checked += 1;
+      try {
+        const [pickings, receiptMoves, receiptLines, finishedMoves] = await Promise.all([
+          call("stock.picking", "read", [repair.picking_id], {
+            positionalArgs: [[repair.picking_id]],
+            fields: ["id", "name", "state", "date_done"],
+          }),
+          call("stock.move", "read", [repair.receipt_move_id], {
+            positionalArgs: [[repair.receipt_move_id]],
+            fields: [
+              "id", "state", "picked", "is_subcontract", "product_id",
+              "quantity", "move_orig_ids", "move_line_ids",
+            ],
+          }),
+          call("stock.move.line", "read", [repair.receipt_move_line_id], {
+            positionalArgs: [[repair.receipt_move_line_id]],
+            fields: ["id", "state", "move_id", "product_id", "quantity", "lot_id"],
+          }),
+          call("stock.move", "read", [repair.finished_move_id], {
+            positionalArgs: [[repair.finished_move_id]],
+            fields: [
+              "id", "state", "production_id", "product_id", "quantity", "move_dest_ids",
+            ],
+          }),
+        ]);
+        const picking = pickings?.[0];
+        const receiptMove = receiptMoves?.[0];
+        const receiptLine = receiptLines?.[0];
+        const finishedMove = finishedMoves?.[0];
+        if (!picking || !receiptMove || !receiptLine || !finishedMove) {
+          throw new Error("Không đọc đủ record để khôi phục liên kết MO.");
+        }
+        const alreadyLinked =
+          receiptMove.move_orig_ids?.includes(repair.finished_move_id) &&
+          finishedMove.move_dest_ids?.includes(repair.receipt_move_id);
+        if (alreadyLinked) {
+          updateDoneMoRepairStatus(
+            repair.id,
+            picking.state === "done" ? "relinked" : "failed",
+            picking.state === "done" ? null : "Liên kết MO chưa được tách; hãy Preview/Apply lại."
+          );
+          if (picking.state === "done") relinked += 1;
+          continue;
+        }
+        if (picking.state === "cancel") {
+          await writeMoveOrigins(repair.receipt_move_id, [4, repair.finished_move_id], call);
+          updateDoneMoRepairStatus(repair.id, "relinked");
+          relinked += 1;
+          continue;
+        }
+        if (picking.state !== "done") {
+          if (repair.status === "preparing" && !receiptMove.move_orig_ids?.length) {
+            updateDoneMoRepairStatus(repair.id, "prepared");
+          }
+          continue;
+        }
+        if (
+          !picking.date_done ||
+          receiptMove.state !== "done" ||
+          !receiptMove.picked ||
+          !receiptMove.is_subcontract ||
+          toId(receiptMove.product_id) !== repair.product_id ||
+          !isOneUnit(receiptMove.quantity) ||
+          receiptMove.move_orig_ids?.length ||
+          !receiptMove.move_line_ids?.includes(repair.receipt_move_line_id) ||
+          receiptLine.state !== "done" ||
+          toId(receiptLine.move_id) !== repair.receipt_move_id ||
+          toId(receiptLine.product_id) !== repair.product_id ||
+          !isOneUnit(receiptLine.quantity) ||
+          toId(receiptLine.lot_id) !== repair.lot_id ||
+          finishedMove.state !== "done" ||
+          toId(finishedMove.production_id) !== repair.production_id ||
+          toId(finishedMove.product_id) !== repair.product_id ||
+          !isOneUnit(finishedMove.quantity) ||
+          finishedMove.move_dest_ids?.length
+        ) {
+          throw new Error("Phiếu đã Done nhưng dữ liệu không còn khớp snapshot repair.");
+        }
+        await writeMoveOrigins(repair.receipt_move_id, [4, repair.finished_move_id], call);
+        const verify = await call("stock.move", "read", [repair.receipt_move_id], {
+          positionalArgs: [[repair.receipt_move_id]],
+          fields: ["id", "move_orig_ids"],
+        });
+        if (!verify?.[0]?.move_orig_ids?.includes(repair.finished_move_id)) {
+          throw new Error("Odoo chưa xác nhận liên kết MO đã được khôi phục.");
+        }
+        updateDoneMoRepairStatus(repair.id, "relinked");
+        relinked += 1;
+      } catch (error) {
+        console.error(`[LotRepair] picking ${repair.picking_id}: ${error.message}`);
+      }
+    }
+    return { checked, relinked };
+  } finally {
+    reconcilingDoneMoRepairs = false;
+  }
 }
 
 async function makePlan(pickingName, call) {
@@ -697,6 +1058,8 @@ async function makePlan(pickingName, call) {
           move_line_id: line.id,
           subcontract_mo_id: source.subcontract_mo_id,
           subcontract_mo_name: source.subcontract_mo_name,
+          source_mo_state: source.source_mo_state,
+          prepare_done_mo: source.source_mo_state === "done",
           existing_source_lot: true,
         });
       } else if (generated) {
@@ -709,13 +1072,28 @@ async function makePlan(pickingName, call) {
     }
   }
 
+  const plannedLotByMoveLine = new Map(lots.map((lot) => [lot.move_line_id, lot]));
+  const doneMoRepairs = (subcontract.doneMoRepairs || []).map((repair) => ({
+    ...repair,
+    lot_name: plannedLotByMoveLine.get(repair.move_line_id)?.name || repair.lot_name,
+  }));
+  for (const repair of doneMoRepairs.filter((item) => !item.lot_id || !item.lot_name)) {
+    blockingIssues.push({
+      product_id: repair.product_id,
+      product_name: repair.product_name,
+      code: "done_subcontract_mo_missing_serial",
+      message: `MO ${repair.subcontract_mo_name} đã Done nhưng không xác định được một serial nguồn duy nhất.`,
+    });
+  }
+
   return {
     picking,
     poCode,
     products: analysis.products,
     blockingIssues,
     lots,
-    hash: planHash(picking.id, lots),
+    doneMoRepairs,
+    hash: planHash(picking.id, lots, doneMoRepairs),
   };
 }
 
@@ -731,9 +1109,12 @@ function previewResponse(plan) {
       rename_source_lot: Boolean(lot.rename_source_lot),
       previous_name: lot.previous_name || null,
       subcontract_mo_name: lot.subcontract_mo_name || null,
+      prepare_done_mo: Boolean(lot.prepare_done_mo),
     });
   }
-  const canApply = plan.lots.length > 0 && plan.blockingIssues.length === 0;
+  const canApply =
+    (plan.lots.length > 0 || plan.doneMoRepairs.length > 0) &&
+    plan.blockingIssues.length === 0;
   const totalSkipped = plan.products.reduce(
     (total, product) => total + (product.existing_lots?.length || 0),
     0
@@ -759,13 +1140,16 @@ function previewResponse(plan) {
     total_to_create: plan.lots.filter((lot) => !lot.id).length,
     total_existing_source_lots: plan.lots.filter((lot) => lot.existing_source_lot).length,
     total_to_rename: plan.lots.filter((lot) => lot.rename_source_lot).length,
+    total_done_mos_to_prepare: plan.doneMoRepairs.length,
     total_skipped: totalSkipped,
     applied: false,
     message: plan.blockingIssues.length
       ? "Cần xử lý các dòng Detail được cảnh báo trước khi Apply."
-      : plan.lots.length
-        ? "Preview — chưa tạo hoặc ghi serial nào trên Odoo."
-        : "Tất cả các dòng serial đã có lot/serial trên Detail.",
+      : plan.doneMoRepairs.length
+        ? "Preview — hệ thống sẽ chuẩn bị nhận serial đã sản xuất từ MO Done; chưa ghi dữ liệu trên Odoo."
+        : plan.lots.length
+          ? "Preview — chưa tạo hoặc ghi serial nào trên Odoo."
+          : "Tất cả các dòng serial đã có lot/serial trên Detail.",
   };
 }
 
@@ -815,6 +1199,26 @@ async function runGenerateLots(pickingName, expectedPlanHash) {
     failed.push({ ...item, error: "Odoo không xác nhận mã serial đã được ghi vào Detail." });
   }
 
+  const lotPlanLineIds = new Set(plan.lots.map((item) => item.move_line_id));
+  const preparedRepairs = [];
+  for (const repair of plan.doneMoRepairs) {
+    if (lotPlanLineIds.has(repair.move_line_id) && !verifiedIds.has(repair.move_line_id)) {
+      failed.push({
+        ...repair,
+        name: repair.lot_name,
+        error: "Không chuẩn bị MO Done vì serial chưa được xác nhận trên Detail.",
+      });
+      continue;
+    }
+    try {
+      preparedRepairs.push(
+        await prepareDoneMoReceiptRepair(repair, plan.picking, callOdooAPI)
+      );
+    } catch (error) {
+      failed.push({ ...repair, name: repair.lot_name, error: error.message });
+    }
+  }
+
   const byProduct = (product) => ({
     product_id: product.product_id,
     product_name: product.product_name,
@@ -856,14 +1260,17 @@ async function runGenerateLots(pickingName, expectedPlanHash) {
     total_created: createdCount,
     total_renamed: renamedCount,
     total_assigned: verified.length,
+    total_prepared_done_mos: preparedRepairs.length,
     total_pending_lot_creation: pendingCount,
     total_failed: failed.length,
     applied: true,
     message: failed.length
-      ? `Đã điền ${verified.length} serial vào Detail, còn ${failed.length} dòng lỗi.`
-      : pendingCount
-        ? `Đã điền ${verified.length} serial vào Detail. ${pendingCount} lot sẽ được Odoo tạo khi Validate.`
-        : `Đã tạo và gán thành công ${verified.length} lot/serial vào Detail trên Odoo.`,
+      ? `Đã điền ${verified.length} serial vào Detail, chuẩn bị ${preparedRepairs.length} MO Done; còn ${failed.length} dòng lỗi.`
+      : preparedRepairs.length
+        ? `Đã chuẩn hóa serial và chuẩn bị ${preparedRepairs.length} MO Done. Qua Odoo Validate phiếu; hệ thống sẽ tự khôi phục liên kết truy vết sau khi phiếu Done.`
+        : pendingCount
+          ? `Đã điền ${verified.length} serial vào Detail. ${pendingCount} lot sẽ được Odoo tạo khi Validate.`
+          : `Đã tạo và gán thành công ${verified.length} lot/serial vào Detail trên Odoo.`,
   };
   } finally {
     applyingPickings.delete(lockKey);
