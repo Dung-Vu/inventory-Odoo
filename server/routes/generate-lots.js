@@ -48,6 +48,10 @@ function isOneUnit(value) {
   return Math.abs(asQuantity(value) - 1) < QTY_EPSILON;
 }
 
+function moveLineQuantity(line) {
+  return asQuantity(line.quantity ?? line.qty_done);
+}
+
 function toId(value) {
   return Array.isArray(value) ? value[0] : value || false;
 }
@@ -68,7 +72,7 @@ function planHash(pickingId, lots) {
   const body = lots
     .map(
       (lot) =>
-        `${lot.move_line_id}:${lot.product_id}:${lot.name}:${lot.id || "new"}:${lot.subcontract_mo_id || ""}`
+        `${lot.move_line_id}:${lot.product_id}:${lot.name}:${lot.id || "new"}:${lot.previous_name || ""}:${lot.subcontract_mo_id || ""}`
     )
     .join("|");
   return crypto.createHash("sha256").update(`${pickingId}|${body}`).digest("hex");
@@ -195,26 +199,24 @@ export async function collectSerialTargets(pickingId, pickingCompanyId, call) {
       (line) => toId(line.product_id) === group.product_id && moveIds.has(toId(line.move_id))
     );
     const expectedQty = group.moves.reduce((sum, move) => sum + asQuantity(move.product_uom_qty), 0);
-    const missingLines = lines.filter((line) => !line.lot_id && !line.lot_name);
-    const existingLots = lines
-      .filter((line) => line.lot_id || line.lot_name)
-      .map((line) => ({
+    const lineDetails = lines.map((line) => ({
+      line,
+      quantity: moveLineQuantity(line),
+      hasLot: Boolean(line.lot_id || line.lot_name),
+    }));
+    const detailedQty = lineDetails.reduce((sum, detail) => sum + detail.quantity, 0);
+    const existingLots = lineDetails
+      .filter((detail) => detail.hasLot)
+      .map(({ line }) => ({
         move_line_id: line.id,
         id: toId(line.lot_id) || null,
         name: line.lot_id?.[1] || line.lot_name,
         reason: "Đã được gắn trên Detail của phiếu nhập.",
       }));
-    const plannableLines = [];
-    const invalidLines = [];
-
-    for (const line of missingLines) {
-      const quantity = asQuantity(line.quantity || line.qty_done);
-      if (isOneUnit(quantity)) {
-        plannableLines.push({ id: line.id, quantity });
-      } else {
-        invalidLines.push({ id: line.id, quantity });
-      }
-    }
+    const invalidLines = lineDetails.filter((detail) => !isOneUnit(detail.quantity));
+    const plannableLines = lineDetails
+      .filter((detail) => !detail.hasLot && isOneUnit(detail.quantity))
+      .map(({ line, quantity }) => ({ id: line.id, quantity }));
 
     if (!lines.length && expectedQty > 0) {
       blockingIssues.push({
@@ -224,13 +226,21 @@ export async function collectSerialTargets(pickingId, pickingCompanyId, call) {
         message: "Chưa có dòng Detail để gán serial. Hãy tạo Detailed Operations theo từng đơn vị trước.",
       });
     }
+    if (lines.length && Math.abs(detailedQty - expectedQty) >= QTY_EPSILON) {
+      blockingIssues.push({
+        product_id: group.product_id,
+        product_name: group.product_name,
+        code: "serial_detail_quantity_mismatch",
+        message: `Tổng số lượng Detail (${detailedQty}) không khớp số lượng yêu cầu (${expectedQty}). Hãy đồng bộ Detailed Operations trước khi Apply.`,
+      });
+    }
     if (invalidLines.length) {
       blockingIssues.push({
         product_id: group.product_id,
         product_name: group.product_name,
         code: "serial_line_quantity_not_one",
-        message: "Serial phải có đúng một mã cho mỗi đơn vị. Hãy tách các dòng Detail có số lượng khác 1 trước khi Apply.",
-        move_line_ids: invalidLines.map((line) => line.id),
+        message: "Mọi dòng Detail của sản phẩm tracking serial phải có số lượng đúng bằng 1, kể cả dòng đã có lot. Hãy tách các dòng sai trước khi Apply.",
+        move_line_ids: invalidLines.map(({ line }) => line.id),
       });
     }
 
@@ -243,10 +253,10 @@ export async function collectSerialTargets(pickingId, pickingCompanyId, call) {
       total_qty: expectedQty,
       need_lots: plannableLines.length,
       plannable_lines: plannableLines,
-      invalid_lines: invalidLines,
+      invalid_lines: invalidLines.map(({ line, quantity }) => ({ id: line.id, quantity })),
       move_lines: lines.map((line) => ({
         id: line.id,
-        qty: asQuantity(line.quantity || line.qty_done),
+        qty: moveLineQuantity(line),
         lot_id: toId(line.lot_id) || null,
         lot_name: line.lot_name || null,
       })),
@@ -325,33 +335,57 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-async function nextSequences(poCode, products, call) {
-  const sequenceByProduct = new Map();
+export function lotSequenceNamespace(poCode, product) {
+  return `${product.company_id || 0}:${poCode}-${product.slug}-`;
+}
+
+export function isGeneratedLotName(poCode, product, lotName) {
+  const prefix = `${poCode}-${product.slug}-`;
+  return new RegExp(`^${escapeRegExp(prefix)}\\d+$`).test(String(lotName || ""));
+}
+
+export async function nextSequences(poCode, products, call) {
+  const productsByNamespace = new Map();
   for (const product of products) {
+    const namespace = lotSequenceNamespace(poCode, product);
+    if (!productsByNamespace.has(namespace)) productsByNamespace.set(namespace, product);
+  }
+
+  const sequenceByNamespace = new Map();
+  for (const [namespace, product] of productsByNamespace) {
     const prefix = `${poCode}-${product.slug}-`;
     const rows = await call(
       "stock.lot",
       "search_read",
-      [["product_id", "=", product.product_id], ["name", "=ilike", `${prefix}%`]],
-      ["name", "company_id"]
+      [["company_id", "=", product.company_id || false], ["name", "=ilike", `${prefix}%`]],
+      ["name"]
     );
     const matcher = new RegExp(`^${escapeRegExp(prefix)}(\\d+)$`);
     const max = rows.reduce((highest, lot) => {
       const match = matcher.exec(String(lot.name || ""));
       return match ? Math.max(highest, Number(match[1])) : highest;
     }, 0);
-    sequenceByProduct.set(product.product_id, max + 1);
+    sequenceByNamespace.set(namespace, max + 1);
   }
-  return sequenceByProduct;
+  return sequenceByNamespace;
 }
 
-export function buildLotPlan(poCode, products, sequenceByProduct) {
+export function buildLotPlan(poCode, products, sequenceByNamespace) {
   const lots = [];
+  const nextByNamespace = new Map(sequenceByNamespace);
+  const plannedNames = new Set();
   for (const product of products) {
-    let sequence = sequenceByProduct.get(product.product_id) || 1;
+    const namespace = lotSequenceNamespace(poCode, product);
+    let sequence = nextByNamespace.get(namespace) || 1;
     for (const line of product.plannable_lines || []) {
+      const name = `${poCode}-${product.slug}-${pad3(sequence)}`;
+      const uniqueKey = `${product.company_id || 0}:${name}`;
+      if (plannedNames.has(uniqueKey)) {
+        throw new Error(`Kế hoạch tạo lot bị trùng mã "${name}" trong cùng công ty.`);
+      }
+      plannedNames.add(uniqueKey);
       lots.push({
-        name: `${poCode}-${product.slug}-${pad3(sequence)}`,
+        name,
         product_id: product.product_id,
         product_name: product.product_name,
         company_id: product.company_id || false,
@@ -360,6 +394,7 @@ export function buildLotPlan(poCode, products, sequenceByProduct) {
       });
       sequence += 1;
     }
+    nextByNamespace.set(namespace, sequence);
   }
   return lots;
 }
@@ -415,6 +450,12 @@ async function writeMoveLine(moveLineId, values, call) {
   });
 }
 
+async function writeLot(lotId, values, call) {
+  await call("stock.lot", "write", [], {
+    positionalArgs: [[[lotId], values]],
+  });
+}
+
 async function removeUnlinkedLot(lotId, call) {
   await call("stock.lot", "unlink", [], { positionalArgs: [[[lotId]]] });
 }
@@ -432,10 +473,61 @@ async function linkLotToSubcontractMO(moId, lotId, call) {
 
 export async function createAndAssignLot(item, call) {
   if (item.id) {
+    if (item.rename_source_lot) {
+      const rows = await call("stock.lot", "read", [item.id], {
+        positionalArgs: [[item.id]],
+        fields: ["id", "name", "product_id", "company_id"],
+      });
+      const current = rows?.[0];
+      if (
+        !current ||
+        current.name !== item.previous_name ||
+        toId(current.product_id) !== item.product_id ||
+        toId(current.company_id) !== (item.company_id || false)
+      ) {
+        const error = new Error("Lot nguồn đã thay đổi sau Preview. Vui lòng Preview lại.");
+        error.status = 409;
+        throw error;
+      }
+      const collisions = await call(
+        "stock.lot",
+        "search_read",
+        [["company_id", "=", item.company_id || false], ["name", "=", item.name]],
+        ["id", "name", "product_id"]
+      );
+      if ((collisions || []).some((lot) => lot.id !== item.id)) {
+        const error = new Error(`Mã lot "${item.name}" vừa được sử dụng. Vui lòng Preview lại.`);
+        error.status = 409;
+        throw error;
+      }
+
+      await writeLot(item.id, { name: item.name }, call);
+      try {
+        await writeMoveLine(item.move_line_id, { lot_id: item.id }, call);
+      } catch (lineError) {
+        try {
+          await writeLot(item.id, { name: item.previous_name }, call);
+        } catch (rollbackError) {
+          throw new Error(
+            `Đã đổi tên lot nhưng không gán được vào Detail (${lineError.message}); rollback tên lot cũng lỗi (${rollbackError.message}).`
+          );
+        }
+        throw lineError;
+      }
+      return {
+        ...item,
+        created: false,
+        renamed: true,
+        assign_method: "source_lot_renamed_then_lot_id",
+        pending_lot: false,
+      };
+    }
+
     await writeMoveLine(item.move_line_id, { lot_id: item.id }, call);
     return {
       ...item,
       created: false,
+      renamed: false,
       assign_method: item.subcontract_mo_id ? "subcontract_mo_then_lot_id" : "lot_id",
       pending_lot: false,
     };
@@ -524,29 +616,42 @@ async function makePlan(pickingName, call) {
       }),
     }))
     .filter((product) => product.plannable_lines.length);
-  const productsToCreate = productPlans
+  const poCode = productPlans.length ? await resolveSourceDocumentCode(picking, call) : null;
+  const productsNeedingGeneratedNames = productPlans
     .map((product) => ({
       ...product,
       plannable_lines: product.plannable_lines.filter((line) => {
         const source = subcontract.byMoveLine.get(line.id);
-        return !source?.existing_lot_id;
+        return (
+          !source?.existing_lot_id ||
+          !isGeneratedLotName(poCode, product, source.existing_lot_name)
+        );
       }),
     }))
     .filter((product) => product.plannable_lines.length);
-  const poCode = productsToCreate.length ? await resolveSourceDocumentCode(picking, call) : null;
-  const sequenceByProduct = productsToCreate.length
-    ? await nextSequences(poCode, productsToCreate, call)
+  const sequenceByNamespace = productsNeedingGeneratedNames.length
+    ? await nextSequences(poCode, productsNeedingGeneratedNames, call)
     : new Map();
-  const createdLots = buildLotPlan(poCode, productsToCreate, sequenceByProduct);
-  const createdByMoveLine = new Map(createdLots.map((lot) => [lot.move_line_id, lot]));
+  const generatedLots = buildLotPlan(
+    poCode,
+    productsNeedingGeneratedNames,
+    sequenceByNamespace
+  );
+  const generatedByMoveLine = new Map(generatedLots.map((lot) => [lot.move_line_id, lot]));
   const lots = [];
   for (const product of productPlans) {
     for (const line of product.plannable_lines) {
       const source = subcontract.byMoveLine.get(line.id);
+      const generated = generatedByMoveLine.get(line.id);
       if (source?.existing_lot_id) {
+        const desiredName = generated?.name || source.existing_lot_name;
+        const renameSourceLot = desiredName !== source.existing_lot_name;
         lots.push({
-          name: source.existing_lot_name,
+          name: desiredName,
           id: source.existing_lot_id,
+          previous_name: renameSourceLot ? source.existing_lot_name : null,
+          rename_source_lot: renameSourceLot,
+          sequence: generated?.sequence,
           product_id: product.product_id,
           product_name: product.product_name,
           company_id: product.company_id,
@@ -555,15 +660,12 @@ async function makePlan(pickingName, call) {
           subcontract_mo_name: source.subcontract_mo_name,
           existing_source_lot: true,
         });
-      } else {
-        const lot = createdByMoveLine.get(line.id);
-        if (lot) {
-          lots.push({
-            ...lot,
-            subcontract_mo_id: source?.subcontract_mo_id || null,
-            subcontract_mo_name: source?.subcontract_mo_name || null,
-          });
-        }
+      } else if (generated) {
+        lots.push({
+          ...generated,
+          subcontract_mo_id: source?.subcontract_mo_id || null,
+          subcontract_mo_name: source?.subcontract_mo_name || null,
+        });
       }
     }
   }
@@ -587,6 +689,8 @@ function previewResponse(plan) {
       sequence: lot.sequence,
       move_line_id: lot.move_line_id,
       existing_source_lot: Boolean(lot.existing_source_lot),
+      rename_source_lot: Boolean(lot.rename_source_lot),
+      previous_name: lot.previous_name || null,
       subcontract_mo_name: lot.subcontract_mo_name || null,
     });
   }
@@ -612,7 +716,10 @@ function previewResponse(plan) {
       skipped: product.existing_lots || [],
       failed: [],
     })),
+    total_to_assign: plan.lots.length,
     total_to_create: plan.lots.filter((lot) => !lot.id).length,
+    total_existing_source_lots: plan.lots.filter((lot) => lot.existing_source_lot).length,
+    total_to_rename: plan.lots.filter((lot) => lot.rename_source_lot).length,
     total_skipped: totalSkipped,
     applied: false,
     message: plan.blockingIssues.length
@@ -625,8 +732,23 @@ function previewResponse(plan) {
 
 async function runGenerateLots(pickingName, expectedPlanHash) {
   assertOdooConfiguration();
+  if (typeof expectedPlanHash !== "string" || !expectedPlanHash.trim()) {
+    const error = new Error("Bắt buộc Preview trước khi Apply.");
+    error.status = 400;
+    throw error;
+  }
+
   const plan = await makePlan(pickingName, callOdooAPI);
-  if (expectedPlanHash && expectedPlanHash !== plan.hash) {
+  const lockKey = plan.picking.id;
+  if (applyingPickings.has(lockKey)) {
+    const error = new Error("Phiếu này đang được Apply. Vui lòng chờ thao tác trước hoàn tất.");
+    error.status = 409;
+    throw error;
+  }
+  applyingPickings.add(lockKey);
+
+  try {
+  if (expectedPlanHash !== plan.hash) {
     const error = new Error("Phiếu hoặc Detail đã thay đổi sau Preview. Vui lòng Preview lại trước khi Apply.");
     error.status = 409;
     throw error;
@@ -670,6 +792,9 @@ async function runGenerateLots(pickingName, expectedPlanHash) {
         move_line_id: item.move_line_id,
         assign_method: item.assign_method,
         pending_lot: item.pending_lot,
+        existing_source_lot: Boolean(item.existing_source_lot),
+        renamed: Boolean(item.renamed),
+        previous_name: item.previous_name || null,
       })),
     skipped: product.existing_lots || [],
     failed: failed
@@ -679,6 +804,7 @@ async function runGenerateLots(pickingName, expectedPlanHash) {
 
   const pendingCount = verified.filter((item) => item.pending_lot).length;
   const createdCount = verified.filter((item) => item.created).length;
+  const renamedCount = verified.filter((item) => item.renamed).length;
   return {
     picking: pickingSummary(plan.picking),
     po_code: plan.poCode,
@@ -689,6 +815,7 @@ async function runGenerateLots(pickingName, expectedPlanHash) {
       0
     ),
     total_created: createdCount,
+    total_renamed: renamedCount,
     total_assigned: verified.length,
     total_pending_lot_creation: pendingCount,
     total_failed: failed.length,
@@ -699,6 +826,9 @@ async function runGenerateLots(pickingName, expectedPlanHash) {
         ? `Đã điền ${verified.length} serial vào Detail. ${pendingCount} lot sẽ được Odoo tạo khi Validate.`
         : `Đã tạo và gán thành công ${verified.length} lot/serial vào Detail trên Odoo.`,
   };
+  } finally {
+    applyingPickings.delete(lockKey);
+  }
 }
 
 router.post("/generate-lots/preview", async (req, res, next) => {
@@ -716,17 +846,11 @@ router.post("/generate-lots/preview", async (req, res, next) => {
 router.post("/generate-lots/apply", async (req, res, next) => {
   const pickingName = String(req.body?.pickingName || "").trim();
   if (!pickingName) return res.status(400).json({ error: "Vui lòng nhập mã phiếu (pickingName)" });
-  if (applyingPickings.has(pickingName)) {
-    return res.status(409).json({ error: "Phiếu này đang được Apply. Vui lòng chờ thao tác trước hoàn tất." });
-  }
-  applyingPickings.add(pickingName);
   try {
     res.json(await runGenerateLots(pickingName, req.body?.expectedPlanHash));
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message, ...(error.payload || {}) });
     next(error);
-  } finally {
-    applyingPickings.delete(pickingName);
   }
 });
 

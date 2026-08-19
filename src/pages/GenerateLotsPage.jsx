@@ -49,13 +49,17 @@ export default function GenerateLotsPage() {
       const data = await previewLots(pickingName.trim())
       setPreviewData(data)
       setPreviewInput(pickingName.trim())
-      if (data.total_to_create === 0 && data.total_skipped === 0) {
-        toast.success(data.message || 'Không có lot nào cần tạo')
+      if (data.can_apply && data.total_to_rename > 0) {
+        toast.success(
+          `Sẽ chuẩn hóa tên ${data.total_to_rename} lot nguồn MO và gán ${data.total_to_assign} serial`
+        )
+      } else if (data.can_apply && data.total_to_create === 0) {
+        toast.success(`Sẽ gán ${data.total_to_assign} lot nguồn vào Detail, không tạo lot mới`)
       } else if (data.total_to_create === 0) {
-        toast(data.message || 'Tất cả lot đã tồn tại', { icon: 'ℹ️' })
+        toast(data.message || 'Không có lot nào cần tạo hoặc gán', { icon: 'ℹ️' })
       } else {
         toast.success(
-          `Sẽ tạo ${data.total_to_create} lot${data.total_skipped > 0 ? ` (bỏ qua ${data.total_skipped} đã tồn tại)` : ''}`
+          `Sẽ tạo ${data.total_to_create} lot và gán ${data.total_to_assign} serial${data.total_skipped > 0 ? ` (bỏ qua ${data.total_skipped} đã có)` : ''}`
         )
       }
     } catch (err) {
@@ -84,7 +88,7 @@ export default function GenerateLotsPage() {
         )
       } else {
         toast.success(
-          `Đã tạo thành công ${data.total_created} lot và gán vào move_lines!`
+          `Đã tạo ${data.total_created} lot mới, đổi tên ${data.total_renamed || 0} lot nguồn và gán ${data.total_assigned} serial`
         )
       }
     } catch (err) {
@@ -286,8 +290,10 @@ export default function GenerateLotsPage() {
                     Xác nhận tạo lot trên Production?
                   </h3>
                   <p className="text-sm text-gray-600">
-                    Hành động này sẽ tạo <strong>{previewData?.total_to_create || 0}</strong> mã lot/serial cho
-                    <strong> {previewData?.picking?.name}</strong> và điền vào Detail trên Odoo. Không thể hoàn tác.
+                    Hành động này sẽ tạo <strong>{previewData?.total_to_create || 0}</strong> lot mới,
+                    chuẩn hóa tên <strong>{previewData?.total_to_rename || 0}</strong> lot nguồn MO và gán{' '}
+                    <strong>{previewData?.total_to_assign || 0}</strong> serial vào Detail của
+                    <strong> {previewData?.picking?.name}</strong>. Không tự Validate phiếu.
                   </p>
                 </div>
               </div>
@@ -430,17 +436,24 @@ function ResultSummary({ data, isPreview }) {
         />
         <StatCard
           icon={ListChecks}
-          label="Lot sẽ/đã tạo"
-          value={isPreview ? data.total_to_create : data.total_created ?? 0}
+          label={isPreview ? 'Serial sẽ gán' : 'Serial đã gán'}
+          value={isPreview ? data.total_to_assign || 0 : data.total_assigned || 0}
           color="teal"
         />
         <StatCard
           icon={Tag}
-          label={isPreview ? 'Lot đã tồn tại (bỏ qua)' : 'Lot tạo khi Validate'}
-          value={isPreview ? data.total_skipped || 0 : data.total_pending_lot_creation || 0}
+          label={isPreview ? 'Lot mới sẽ tạo' : 'Lot mới đã tạo'}
+          value={isPreview ? data.total_to_create || 0 : data.total_created || 0}
           color="amber"
         />
-        {!isPreview && (
+        {isPreview ? (
+          <StatCard
+            icon={PackageCheck}
+            label="Lot nguồn đổi tên"
+            value={data.total_to_rename || 0}
+            color="emerald"
+          />
+        ) : (
           <StatCard
             icon={AlertTriangle}
             label="Lỗi"
@@ -505,7 +518,7 @@ function ProductResultCard({ product, isPreview }) {
       {hasLots && (
         <div className="mb-3">
           <p className="text-xs font-semibold text-gray-700 mb-2 uppercase tracking-wide">
-            {isPreview ? 'Sẽ tạo' : 'Đã tạo'} ({product.lots.length})
+            {isPreview ? 'Sẽ gán vào Detail' : 'Đã gán vào Detail'} ({product.lots.length})
           </p>
           <div className="flex flex-wrap gap-2">
             {product.lots.map((lot) => (
@@ -514,10 +527,28 @@ function ProductResultCard({ product, isPreview }) {
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-lg font-mono text-sm text-emerald-800"
               >
                 <Tag size={12} />
+                {lot.previous_name && (
+                  <span className="text-gray-500 line-through" title="Tên lot nguồn trước khi chuẩn hóa">
+                    {lot.previous_name}
+                  </span>
+                )}
+                {lot.previous_name && <span className="text-gray-400">→</span>}
                 {lot.name}
                 {lot.sequence != null && (
                   <span className="text-emerald-500 text-xs">
                     #{String(lot.sequence).padStart(3, '0')}
+                  </span>
+                )}
+                {lot.existing_source_lot && (
+                  <span
+                    className="ml-1 text-[10px] text-blue-700 bg-blue-100 rounded px-1"
+                    title={
+                      lot.rename_source_lot || lot.renamed
+                        ? 'Lot nguồn MO sẽ/đã được đổi sang tên chuẩn rồi gán vào Detail'
+                        : 'Lot đã có trên Manufacturing Order nguồn; hệ thống chỉ gán vào Detail'
+                    }
+                  >
+                    {lot.rename_source_lot || lot.renamed ? 'đổi tên lot nguồn MO' : 'lot nguồn MO'}
                   </span>
                 )}
                 {!isPreview && lot.assign_method === 'lot_name_pending' && (
