@@ -13,7 +13,10 @@ const nodeEnv = process.env.NODE_ENV || 'development'
 let envPath
 if (nodeEnv === 'production') {
   envPath = join(__dirname, '.env')
-  // Also try to load from /app/server/.env in Docker
+  // Load the local server/.env first (needed when running on the host),
+  // then try to load /app/server/.env (Docker) — whichever resolves first
+  // wins; later calls don't overwrite earlier values.
+  dotenv.config({ path: envPath })
   dotenv.config({ path: '/app/server/.env' })
 } else {
   // Development mode: try .env.development first, fallback to .env
@@ -31,6 +34,7 @@ import express from 'express'
 import cors from 'cors'
 import apiRoutes from './routes/api.js'
 import qcRoutes from './routes/qc.js'
+import generateLotsRoutes from './routes/generate-lots.js'
 
 // Log loaded env vars (without sensitive data)
 console.log('Environment variables loaded:')
@@ -74,6 +78,7 @@ app.get('/health', (req, res) => {
 // API routes
 app.use('/api', apiRoutes)
 app.use('/api', qcRoutes)
+app.use('/api', generateLotsRoutes)
 
 // Serve index.html for all other routes in production (SPA routing)
 if (isProduction) {

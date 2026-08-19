@@ -9,6 +9,7 @@
     "dev:full": "concurrently \"npm run dev:server\" \"npm run dev\"",
     "dev:server": "node server/index.js",
     "build": "vite build",
+    "test:lots": "node --test scripts/generate-lots.test.mjs",
     "preview": "vite preview",
     "preview:network": "vite preview --host 0.0.0.0",
     "start": "node server/index.js"

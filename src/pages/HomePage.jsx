@@ -98,6 +98,13 @@ export default function HomePage() {
               <span className="text-xl">🔍</span>
               <span>QC List</span>
             </Link>
+            <Link
+              to="/generate-lots"
+              className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-xl hover:from-emerald-600 hover:to-teal-600 transition-all shadow-lg hover:shadow-xl"
+            >
+              <span className="text-xl">🏷️</span>
+              <span>Tạo Mã Lot Khi Nhập Kho</span>
+            </Link>
           </div>
         </motion.header>
 

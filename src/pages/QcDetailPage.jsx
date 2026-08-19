@@ -37,6 +37,25 @@ function loadRobotoBase64() {
   return qcRobotoBase64Promise
 }
 
+function normalizeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim()
+}
+
+function truncateText(doc, value, maxWidth) {
+  const text = normalizeText(value)
+  if (!text) return ''
+  if (doc.getTextWidth(text) <= maxWidth) return text
+
+  const ellipsis = '...'
+  let truncated = text
+
+  while (truncated && doc.getTextWidth(`${truncated}${ellipsis}`) > maxWidth) {
+    truncated = truncated.slice(0, -1)
+  }
+
+  return truncated ? `${truncated}${ellipsis}` : ellipsis
+}
+
 async function createQcPdfDocument() {
   const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true, putOnlyUsedFonts: true })
   const robotoBase64 = await loadRobotoBase64()
@@ -216,17 +235,15 @@ export default function QcDetailPage() {
       y += 10
 
       // ── TABLE ──
-      // 9 columns matching Odoo template - optimized for long product names
+      // 7 columns matching Odoo template - optimized for long product names (Màu integrated into Subtitle)
       const cols = [
         { x: margin, w: 10, header: 'STT' },
-        { x: margin + 10, w: 70, header: 'TÊN SP & KÍCH THƯỚC' },
-        { x: margin + 80, w: 15, header: 'LOTS' },
-        { x: margin + 95, w: 14, header: 'SL ĐẶT' },
-        { x: margin + 109, w: 15, header: 'MÀU' },
-        { x: margin + 124, w: 17, header: 'SL NHẬN' },
-        { x: margin + 141, w: 12, header: 'ĐẠT' },
-        { x: margin + 153, w: 20, header: 'KHÔNG ĐẠT' },
-        { x: margin + 173, w: 13, header: 'NOTE' },
+        { x: margin + 10, w: 65, header: 'TÊN SP & KÍCH THƯỚC' },
+        { x: margin + 75, w: 35, header: 'LOTS' },
+        { x: margin + 110, w: 15, header: 'SL ĐẶT' },
+        { x: margin + 125, w: 15, header: 'SL NHẬN' },
+        { x: margin + 140, w: 20, header: 'TRẠNG THÁI' },
+        { x: margin + 160, w: 26, header: 'NOTE' },
       ]
       const tableWidth = contentWidth
       const headerH = 12
@@ -306,7 +323,7 @@ export default function QcDetailPage() {
 
           // TÊN SP & KÍCH THƯỚC — wrap text nếu dài
           const prodName = item.product_name || ''
-          const maxCharsPerLine = 38 // ~70mm with 8pt font
+          const maxCharsPerLine = 36 // ~65mm with 8pt font
           let nameLines = []
           if (prodName.length > maxCharsPerLine) {
             // Split by '-' for module names
@@ -331,40 +348,40 @@ export default function QcDetailPage() {
             doc.text(nameLines[1] || '', cols[1].x + 1, y + 9)
           }
 
-          // Parse variant → hiển thị size ở dòng 2 (font nhỏ, xám)
+          // Parse variant → hiển thị size và color ở dòng 2 (font nhỏ, xám)
           const { size, color } = parseVariant(item.variant)
-          if (size) {
+          const subtitleParts = []
+          if (size) subtitleParts.push(size)
+          if (color) subtitleParts.push(color)
+          const subtitle = subtitleParts.join(' - ')
+          if (subtitle) {
             doc.setFontSize(6)
             doc.setTextColor(120, 120, 120)
             // Nếu có 2 dòng tên SP thì size xuống dưới, ngược lại vẫn ở y+10
             const sizeY = nameLines.length > 1 ? y + 12.5 : y + 10
-            doc.text(size, cols[1].x + 1, sizeY)
+            doc.text(truncateText(doc, subtitle, cols[1].w - 2), cols[1].x + 1, sizeY)
             doc.setFontSize(8)
             doc.setTextColor(0, 0, 0)
           }
 
           // LOTS
-          const lots = item.lots ? JSON.parse(item.lots).map(l => l.lot_name || '').join(', ').substring(0, 12) : ''
+          const lotsRaw = item.lots ? JSON.parse(item.lots).map(l => l.lot_name || '').join(', ') : ''
+          const lots = truncateText(doc, lotsRaw, cols[2].w - 2)
           doc.text(lots, cols[2].x + 1, y + 5)
 
           // SL ĐẶT — center chính xác trong cột
           const qtyText = Number(item.quantity || 0).toFixed(2)
           doc.text(qtyText, cols[3].x + cols[3].w / 2, y + 5, { align: 'center' })
 
-          // MÀU — chỉ hiển thị color từ variant
-          const colorText = color.substring(0, 12)
-          doc.text(colorText, cols[4].x + 1, y + 5)
-
           // SL NHẬN — center chính xác trong cột
-          doc.text(qtyText, cols[5].x + cols[5].w / 2, y + 5, { align: 'center' })
+          doc.text(qtyText, cols[4].x + cols[4].w / 2, y + 5, { align: 'center' })
 
-          // ĐẠT / KHÔNG ĐẠT
-          if (item.qc_status === 'passed') doc.text('x', cols[6].x + 5, y + 5)
-          if (item.qc_status === 'failed') doc.text('x', cols[7].x + 5, y + 5)
+          // TRẠNG THÁI — Để trống cho kiểm tra thủ công
 
           // NOTE
-          const note = (item.notes || '').substring(0, 10)
-          doc.text(note, cols[8].x + 1, y + 5)
+          const noteRaw = item.notes || ''
+          const note = truncateText(doc, noteRaw, cols[6].w - 2)
+          doc.text(note, cols[6].x + 1, y + 5)
         }
 
         y += rowH

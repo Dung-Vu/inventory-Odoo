@@ -1,105 +1,10 @@
 import express from "express";
-import axios from "axios";
+import { callOdooAPI, getOdooConfig } from "../odoo-helper.js";
 
 // Note: Environment variables are already loaded in server/index.js
 // We can access them directly via process.env
 
 const router = express.Router();
-
-// Function to get Odoo configuration (loads lazily when called)
-function getOdooConfig() {
-  return {
-    url: process.env.ODOO_URL,
-    db: process.env.ODOO_DB,
-    uid: parseInt(process.env.ODOO_UID, 10),
-    apikey: process.env.ODOO_APIKEY,
-  };
-}
-
-// Helper function to call Odoo API
-async function callOdooAPI(model, method, domain, fields, kwargs) {
-  // Handle case where fields is actually a kwargs object (when called with offset/limit)
-  if (!kwargs && fields && typeof fields === 'object' && !Array.isArray(fields)) {
-    kwargs = fields;
-    fields = kwargs.fields || [];
-    delete kwargs.fields;
-  }
-  const config = getOdooConfig();
-
-  // Validate config before making API call
-  if (!config.url || !config.db || !config.uid || !config.apikey) {
-    console.error("❌ ODOO configuration is incomplete!");
-    console.error("Config:", {
-      url: config.url || "MISSING",
-      db: config.db || "MISSING",
-      uid: config.uid || "MISSING",
-      apikey: config.apikey ? "***" : "MISSING",
-    });
-    throw new Error(
-      "ODOO configuration is incomplete. Please check server/.env file.",
-    );
-  }
-
-  try {
-    const response = await axios.post(
-      config.url,
-      {
-        jsonrpc: "2.0",
-        method: "call",
-        params: {
-          service: "object",
-          method: "execute_kw",
-          args: [
-            config.db,
-            config.uid,
-            config.apikey,
-            model,
-            method,
-            [domain],
-            { fields, ...kwargs },
-          ],
-        },
-        id: Math.floor(Math.random() * 1000),
-      },
-      {
-        timeout: 30000,
-      },
-    );
-
-    if (response.data.error) {
-      console.error(
-        "[Odoo Error]:",
-        JSON.stringify(response.data.error, null, 2),
-      );
-      const errorMsg =
-        response.data.error.data?.message ||
-        response.data.error.message ||
-        "Lỗi khi gọi Odoo API";
-      throw new Error(errorMsg);
-    }
-
-    return response.data.result;
-  } catch (error) {
-    if (error.response?.data?.error) {
-      console.error(
-        "[Odoo Response Error]:",
-        JSON.stringify(error.response.data.error, null, 2),
-      );
-      const errorMsg =
-        error.response.data.error.data?.message ||
-        error.response.data.error.message ||
-        "Lỗi Odoo API";
-      throw new Error(errorMsg);
-    }
-    if (error.code === "ECONNABORTED") {
-      throw new Error("Request timeout - Odoo server không phản hồi");
-    }
-    if (error.code === "ECONNREFUSED" || error.code === "ENOTFOUND") {
-      throw new Error(`Không thể kết nối đến Odoo: ${config.url}`);
-    }
-    throw error;
-  }
-}
 
 // GET /api/picking/:code - Fetch picking data
 // Note: Using * wildcard to capture full path including slashes
