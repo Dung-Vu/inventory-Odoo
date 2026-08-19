@@ -268,13 +268,16 @@ export async function collectSerialTargets(pickingId, pickingCompanyId, call) {
 }
 
 /**
- * Match every missing subcontract Detail line to exactly one source MO. The
- * source MO's Lot/Serial Number is linked before its receipt Detail changes,
- * which avoids any reset or cancellation of a completed MO.
+ * Match every missing subcontract Detail line to exactly one open source MO.
+ * A subcontract MO that is already Done must never be reused: validating its
+ * linked receipt makes Odoo try to produce it again and raises “Serial number
+ * already produced”.
  */
 export async function resolveSubcontractAssignments(pickingId, products, call) {
   const serialProducts = products.filter(
-    (product) => product.is_subcontract && product.plannable_lines?.length
+    (product) =>
+      product.is_subcontract &&
+      (product.move_lines?.length || product.plannable_lines?.length)
   );
   if (!serialProducts.length) return { byMoveLine: new Map(), blockingIssues: [] };
 
@@ -296,15 +299,28 @@ export async function resolveSubcontractAssignments(pickingId, products, call) {
   const blockingIssues = [];
 
   for (const product of serialProducts) {
-    const lines = product.plannable_lines || [];
-    const mos = sourceMOs
+    const plannableLines = product.plannable_lines || [];
+    const receiptLines = product.move_lines?.length ? product.move_lines : plannableLines;
+    const productMOs = sourceMOs
       .filter((mo) => toId(mo.product_id) === product.product_id)
       .sort((left, right) => left.id - right.id);
+    const doneMOs = productMOs.filter((mo) => mo.state === "done");
+    if (doneMOs.length) {
+      blockingIssues.push({
+        product_id: product.product_id,
+        product_name: product.product_name,
+        code: "subcontract_source_mo_already_done",
+        message: `Subcontracting MO ${doneMOs.map((mo) => mo.name).join(", ")} đã Done và serial đã được sản xuất. Không được Apply: Odoo sẽ báo “Serial number already produced” khi Validate phiếu nhập.`,
+      });
+      continue;
+    }
+
+    const mos = productMOs.filter((mo) => ["confirmed", "progress", "to_close"].includes(mo.state));
     const invalidQuantity = mos.filter((mo) => !isOneUnit(mo.product_qty));
-    const ambiguous = mos.some(
-      (mo) => mo.state === "cancel" || (mo.lot_producing_ids || []).length > 1
-    );
-    if (invalidQuantity.length || mos.length !== lines.length || ambiguous) {
+    const ambiguous =
+      productMOs.length !== mos.length ||
+      mos.some((mo) => (mo.lot_producing_ids || []).length > 1);
+    if (invalidQuantity.length || mos.length !== receiptLines.length || ambiguous) {
       blockingIssues.push({
         product_id: product.product_id,
         product_name: product.product_name,
@@ -315,8 +331,31 @@ export async function resolveSubcontractAssignments(pickingId, products, call) {
       continue;
     }
 
-    lines.forEach((line, index) => {
-      const mo = mos[index];
+    const unmatchedMOs = [...mos];
+    let mappingFailed = false;
+    for (const line of receiptLines.filter((item) => item.lot_id)) {
+      const index = unmatchedMOs.findIndex(
+        (mo) => mo.lot_producing_ids?.[0] === line.lot_id
+      );
+      if (index < 0) {
+        mappingFailed = true;
+        break;
+      }
+      unmatchedMOs.splice(index, 1);
+    }
+    if (mappingFailed || unmatchedMOs.length !== plannableLines.length) {
+      blockingIssues.push({
+        product_id: product.product_id,
+        product_name: product.product_name,
+        code: "subcontract_source_mo_mismatch",
+        message:
+          "Lot trên Detail không khớp Subcontracting MO nguồn. Hãy kiểm tra lại serial trước khi Apply.",
+      });
+      continue;
+    }
+
+    plannableLines.forEach((line, index) => {
+      const mo = unmatchedMOs[index];
       const lotId = mo.lot_producing_ids?.[0] || null;
       const lot = lotId ? lotById.get(lotId) : null;
       byMoveLine.set(line.id, {

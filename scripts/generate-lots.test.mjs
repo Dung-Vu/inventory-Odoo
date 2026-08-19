@@ -50,7 +50,7 @@ test('maps a subcontract Detail line to its matching source MO before assignment
       return [{
         id: 3790,
         name: 'O-MID/SBC/00378',
-        state: 'done',
+        state: 'confirmed',
         product_id: [71, 'ORD-BED-NERISSA (W1800)'],
         product_qty: 1,
         lot_producing_ids: [],
@@ -80,7 +80,7 @@ test('reuses an existing source-MO lot instead of creating another one', async (
       return [{
         id: 3790,
         name: 'O-MID/SBC/00378',
-        state: 'done',
+        state: 'confirmed',
         product_id: [71, 'ORD-BED-NERISSA (W1800)'],
         product_qty: 1,
         lot_producing_ids: [780],
@@ -99,6 +99,34 @@ test('reuses an existing source-MO lot instead of creating another one', async (
   assert.equal(blockingIssues.length, 0)
   assert.equal(byMoveLine.get(901).existing_lot_id, 780)
   assert.equal(byMoveLine.get(901).existing_lot_name, 'O-MH08966-BED-NERISSA-001')
+})
+
+test('blocks a source subcontract MO that was already produced', async () => {
+  const call = async (model) => {
+    if (model === 'mrp.production') {
+      return [{
+        id: 3966,
+        name: 'O-MID/SBC/00426',
+        state: 'done',
+        product_id: [71, 'ORD-BED-NERISSA (W1800)'],
+        product_qty: 1,
+        lot_producing_ids: [788],
+      }]
+    }
+    if (model === 'stock.lot') return [{ id: 788, name: '0000202' }]
+    throw new Error(`Unexpected Odoo model: ${model}`)
+  }
+  const { byMoveLine, blockingIssues } = await resolveSubcontractAssignments(18029, [{
+    product_id: 71,
+    product_name: 'ORD-BED-NERISSA (W1800)',
+    is_subcontract: true,
+    plannable_lines: [{ id: 901, quantity: 1 }],
+  }], call)
+
+  assert.equal(byMoveLine.size, 0)
+  assert.equal(blockingIssues.length, 1)
+  assert.equal(blockingIssues[0].code, 'subcontract_source_mo_already_done')
+  assert.match(blockingIssues[0].message, /Serial number already produced/)
 })
 
 test('links a new lot to the subcontract MO before writing only lot_id to Detail', async () => {
