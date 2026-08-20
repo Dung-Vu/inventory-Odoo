@@ -1,30 +1,20 @@
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
+import { existsSync } from 'fs'
 import dotenv from 'dotenv'
 
 // Get current directory for ES modules
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-// Determine environment - default to development if not set
-const nodeEnv = process.env.NODE_ENV || 'development'
+// Load environment variables strictly from single root .env file
+const rootEnvPath = join(__dirname, '..', '.env')
+const serverEnvPath = join(__dirname, '.env')
+const envPath = existsSync(rootEnvPath) ? rootEnvPath : serverEnvPath
 
-// Load environment variables based on NODE_ENV
-let envPath
-if (nodeEnv === 'production') {
-  envPath = join(__dirname, '.env')
-  // Load the local server/.env first (needed when running on the host),
-  // then try to load /app/server/.env (Docker) — whichever resolves first
-  // wins; later calls don't overwrite earlier values.
-  dotenv.config({ path: envPath })
-  dotenv.config({ path: '/app/server/.env' })
-} else {
-  // Development mode: try .env.development first, fallback to .env
-  envPath = join(__dirname, '.env.development')
-  dotenv.config({ path: envPath })
-  // Fallback to .env if .env.development doesn't exist
-  dotenv.config({ path: join(__dirname, '.env') })
-}
+dotenv.config({ path: envPath })
+
+const nodeEnv = process.env.NODE_ENV || 'development'
 
 console.log(`Running in ${nodeEnv} mode`)
 console.log(`Loading env from: ${envPath}`)
@@ -45,7 +35,7 @@ console.log('  ODOO_UID:', process.env.ODOO_UID || 'not set')
 console.log('  ODOO_APIKEY:', process.env.ODOO_APIKEY ? '***' : 'NOT SET')
 
 const app = express()
-const PORT = parseInt(process.env.PORT || '5004', 10)
+const PORT = parseInt(process.env.PORT || '5005', 10)
 const isProduction = process.env.NODE_ENV === 'production'
 
 // Middleware

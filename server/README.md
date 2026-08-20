@@ -4,7 +4,7 @@ Express.js server để xử lý API calls đến Odoo.
 
 ## Cấu hình
 
-Tạo file `.env` trong thư mục `server/` với nội dung:
+Tạo file `.env` ở thư mục gốc (root) của dự án với nội dung:
 
 ```env
 # Odoo API Configuration

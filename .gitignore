@@ -33,3 +33,8 @@ server/.env.local
 *.njsproj
 *.sln
 *.sw?
+
+# SQLite temporary files
+*.db-shm
+*.db-wal
+*.db-journal

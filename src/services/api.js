@@ -104,3 +104,66 @@ export async function fetchABCAnalysis({ startDate, endDate, productName, varian
     throw new Error(error.message || 'Lỗi khi tải dữ liệu')
   }
 }
+
+/**
+ * Export ABC Analysis and Reorder calculation for all Wood & Chair products as Excel file
+ * @param {Object} params - Filter parameters
+ * @param {string} params.startDate - Start date (YYYY-MM-DD)
+ * @param {string} params.endDate - End date (YYYY-MM-DD)
+ * @param {string} params.productName - Product name filter
+ * @param {number} params.leadtime - Leadtime in days (default 45)
+ * @param {number} params.reviewPeriod - Review period in days (default 45)
+ */
+export async function exportABCAnalysisExcel({ startDate, endDate, productName, leadtime, reviewPeriod } = {}) {
+  try {
+    const params = new URLSearchParams()
+    if (startDate) params.append('startDate', startDate)
+    if (endDate) params.append('endDate', endDate)
+    if (productName) params.append('productName', productName)
+    if (leadtime) params.append('leadtime', leadtime)
+    if (reviewPeriod) params.append('reviewPeriod', reviewPeriod)
+
+    const response = await axios.get(`${API_BASE_URL}/abc-analysis/export-excel?${params.toString()}`, {
+      responseType: 'blob',
+      timeout: 120000, // 2 minutes timeout for large excel report
+    })
+
+    // Create a URL for the blob and trigger download
+    const blob = new Blob([response.data], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    
+    // Extract filename from content-disposition header if present
+    const contentDisposition = response.headers['content-disposition']
+    let fileName = `Bao_Cao_Doanh_So_Reorder_Do_Go_Ghe_${new Date().toISOString().slice(0, 10)}.xlsx`
+    if (contentDisposition) {
+      const match = contentDisposition.match(/filename="?([^";]+)"?/)
+      if (match && match[1]) {
+        fileName = match[1]
+      }
+    }
+
+    link.setAttribute('download', fileName)
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+
+    return true
+  } catch (error) {
+    if (error.response?.data?.error) {
+      throw new Error(error.response.data.error)
+    }
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('Quá thời gian xuất file - Server đang xử lý lượng dữ liệu lớn')
+    }
+    if (error.code === 'ERR_NETWORK') {
+      throw new Error('Không thể kết nối đến server để tải file')
+    }
+    throw new Error(error.message || 'Lỗi khi xuất file Excel')
+  }
+}
+

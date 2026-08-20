@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-dotenv.config({ path: join(__dirname, '../server/.env') })
+dotenv.config({ path: join(__dirname, '../.env') })
 
 const config = {
   url: process.env.ODOO_URL,

@@ -53,7 +53,7 @@ export async function callOdooAPI(model, method, domain, fields, kwargs) {
       apikey: config.apikey ? "***" : "MISSING",
     });
     throw new Error(
-      "ODOO configuration is incomplete. Please check server/.env file."
+      "ODOO configuration is incomplete. Please check .env file."
     );
   }
 

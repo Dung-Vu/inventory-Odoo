@@ -518,7 +518,7 @@ async function findPicking(pickingName, call) {
 function assertOdooConfiguration() {
   const config = getOdooConfig();
   if (!config.url || !config.db || !config.uid || !config.apikey) {
-    const error = new Error("Server configuration error. Please check server/.env file and restart the server.");
+    const error = new Error("Server configuration error. Please check .env file and restart the server.");
     error.status = 500;
     throw error;
   }

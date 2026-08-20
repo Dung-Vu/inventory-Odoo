@@ -11,7 +11,7 @@ import axios from 'axios';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-dotenv.config({ path: join(__dirname, '..', 'server', '.env') });
+dotenv.config({ path: join(__dirname, '..', '.env') });
 
 const config = {
   url: process.env.ODOO_URL,

@@ -11,8 +11,8 @@ import axios from 'axios';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Load env from server directory
-dotenv.config({ path: join(__dirname, '..', 'server', '.env') });
+// Load env from root directory
+dotenv.config({ path: join(__dirname, '..', '.env') });
 
 console.log('═'.repeat(60));
 console.log('🔍 ODOO CONNECTION DIAGNOSTIC TEST');

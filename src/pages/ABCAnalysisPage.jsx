@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { fetchABCAnalysis } from '../services/api'
+import { FileSpreadsheet, Loader2 } from 'lucide-react'
+import toast from 'react-hot-toast'
+import { fetchABCAnalysis, exportABCAnalysisExcel } from '../services/api'
 import LoadingSpinner from '../components/LoadingSpinner'
 import Card from '../components/ui/Card'
 import Button from '../components/ui/Button'
 
 function ABCAnalysisPage({ pageTitle, variantTag }) {
   const [loading, setLoading] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [error, setError] = useState(null)
   const [data, setData] = useState(null)
   const [startDate, setStartDate] = useState('')
@@ -59,6 +62,25 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
       endDate: '',
       productName: '',
     })
+  }
+
+  const handleExportExcel = async () => {
+    try {
+      setExporting(true)
+      toast.loading('Đang trích xuất dữ liệu và tạo file Excel...', { id: 'export-excel' })
+      await exportABCAnalysisExcel({
+        startDate: startDate || undefined,
+        endDate: endDate || undefined,
+        productName: productName || undefined,
+        leadtime: 45,
+        reviewPeriod: 45,
+      })
+      toast.success('Xuất file Excel thành công!', { id: 'export-excel' })
+    } catch (err) {
+      toast.error(err.message || 'Lỗi khi xuất file Excel', { id: 'export-excel' })
+    } finally {
+      setExporting(false)
+    }
   }
 
   const getFilteredProducts = () => {
@@ -118,25 +140,42 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 via-blue-50 to-cyan-50 p-4 md:p-6">
       <div className="max-w-7xl mx-auto mb-6">
-        <div className="flex items-center gap-4 mb-4">
-          <Link
-            to="/"
-            className="p-2 rounded-lg bg-white/80 backdrop-blur shadow-sm hover:shadow-md transition-shadow"
-          >
-            <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
-          </Link>
-          <div>
-            <h1 className="text-2xl md:text-3xl font-bold bg-gradient-to-r from-purple-600 to-blue-600 bg-clip-text text-transparent">
-              {pageTitle}
-            </h1>
-            <p className="text-sm text-gray-500">
-              {isStockFabricsReport
-                ? 'Theo dõi số mét vải bán trực tiếp và doanh số tương ứng của chính các line vải'
-                : 'Theo dõi và phân tích doanh số sản phẩm'}
-            </p>
-            <p className="text-xs text-purple-600 font-medium mt-1">Variant tag: {variantTag}</p>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+          <div className="flex items-center gap-4">
+            <Link
+              to="/"
+              className="p-2 rounded-lg bg-white/80 backdrop-blur shadow-sm hover:shadow-md transition-shadow"
+            >
+              <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+              </svg>
+            </Link>
+            <div>
+              <h1 className="text-2xl md:text-3xl font-bold bg-gradient-to-r from-purple-600 to-blue-600 bg-clip-text text-transparent">
+                {pageTitle}
+              </h1>
+              <p className="text-sm text-gray-500">
+                {isStockFabricsReport
+                  ? 'Theo dõi số mét vải bán trực tiếp và doanh số tương ứng của chính các line vải'
+                  : 'Theo dõi và phân tích doanh số sản phẩm & tính toán Reorder'}
+              </p>
+              <p className="text-xs text-purple-600 font-medium mt-1">Variant tag: {variantTag}</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleExportExcel}
+              disabled={exporting}
+              className="px-4 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl font-medium shadow-md shadow-emerald-500/20 hover:shadow-lg transition-all flex items-center gap-2 text-sm disabled:opacity-50 cursor-pointer"
+            >
+              {exporting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="w-4 h-4" />
+              )}
+              <span>{exporting ? 'Đang xuất file...' : 'Xuất Excel Đồ Gỗ & Ghế (Full Reorder)'}</span>
+            </button>
           </div>
         </div>
 
@@ -255,6 +294,19 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
             <Button type="button" variant="secondary" onClick={handleReset}>
               Reset
             </Button>
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              disabled={exporting}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-medium shadow-sm hover:shadow transition-all flex items-center gap-2 text-sm disabled:opacity-50 cursor-pointer"
+            >
+              {exporting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="w-4 h-4" />
+              )}
+              <span>Xuất Excel</span>
+            </button>
           </form>
 
           <div className="flex gap-2 mt-4 border-t pt-4">
