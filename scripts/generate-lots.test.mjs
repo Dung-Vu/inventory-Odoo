@@ -9,7 +9,9 @@ import {
   nextSequences,
   normalizeLotSegment,
   prepareDoneMoReceiptRepair,
+  reconcileDoneMoRepairs,
   resolveSubcontractAssignments,
+  watchSubcontractAssignments,
   resolveSourceDocumentCode,
   slugifyProductName,
 } from '../server/routes/generate-lots.js'
@@ -55,6 +57,7 @@ test('maps a subcontract Detail line to its matching source MO before assignment
         product_id: [71, 'ORD-BED-NERISSA (W1800)'],
         product_qty: 1,
         lot_producing_ids: [],
+        move_finished_ids: [910],
       }]
     }
     throw new Error(`Unexpected Odoo model: ${model}`)
@@ -73,6 +76,7 @@ test('maps a subcontract Detail line to its matching source MO before assignment
     existing_lot_id: null,
     existing_lot_name: null,
     source_mo_state: 'confirmed',
+    finished_move_id: 910,
   })
 })
 
@@ -86,6 +90,7 @@ test('reuses an existing source-MO lot instead of creating another one', async (
         product_id: [71, 'ORD-BED-NERISSA (W1800)'],
         product_qty: 1,
         lot_producing_ids: [780],
+        move_finished_ids: [910],
       }]
     }
     if (model === 'stock.lot') return [{ id: 780, name: 'O-MH08966-BED-NERISSA-001' }]
@@ -101,6 +106,153 @@ test('reuses an existing source-MO lot instead of creating another one', async (
   assert.equal(blockingIssues.length, 0)
   assert.equal(byMoveLine.get(901).existing_lot_id, 780)
   assert.equal(byMoveLine.get(901).existing_lot_name, 'O-MH08966-BED-NERISSA-001')
+  assert.equal(byMoveLine.get(901).finished_move_id, 910)
+})
+
+test('records a watcher when lot Apply finishes before the subcontract MO is Done', () => {
+  const saved = []
+  const watched = watchSubcontractAssignments([{
+    id: 780,
+    product_id: 71,
+    move_line_id: 901,
+    receipt_move_id: 501,
+    subcontract_mo_id: 3790,
+    source_mo_state: 'confirmed',
+    finished_move_id: 910,
+  }], { id: 16910, name: 'O-MID/IN/00123' }, {
+    save: (values) => {
+      saved.push(values)
+      return { id: 1, ...values }
+    },
+  })
+
+  assert.equal(watched.length, 1)
+  assert.deepEqual(saved, [{
+    picking_id: 16910,
+    picking_name: 'O-MID/IN/00123',
+    receipt_move_id: 501,
+    receipt_move_line_id: 901,
+    finished_move_id: 910,
+    production_id: 3790,
+    product_id: 71,
+    lot_id: 780,
+    status: 'watching',
+  }])
+})
+
+test('does not watch a subcontract MO that was already prepared as Done', () => {
+  const watched = watchSubcontractAssignments([{
+    id: 780,
+    product_id: 71,
+    move_line_id: 901,
+    receipt_move_id: 501,
+    subcontract_mo_id: 3790,
+    source_mo_state: 'done',
+    finished_move_id: 910,
+  }], { id: 16910, name: 'O-MID/IN/00123' }, {
+    save: () => { throw new Error('must not save') },
+  })
+  assert.deepEqual(watched, [])
+})
+
+test('watch reconciler safely detaches when the source MO later becomes Done', async () => {
+  let linked = true
+  const updates = []
+  const repair = {
+    id: 1,
+    picking_id: 16910,
+    picking_name: 'O-MID/IN/00123',
+    receipt_move_id: 501,
+    receipt_move_line_id: 901,
+    finished_move_id: 910,
+    production_id: 3790,
+    product_id: 71,
+    lot_id: 780,
+    status: 'watching',
+  }
+  const receiptMove = () => ({
+    id: 501,
+    state: 'assigned',
+    picked: false,
+    is_subcontract: true,
+    product_id: [71, 'product'],
+    quantity: 1,
+    purchase_line_id: [88, 'PO line'],
+    move_orig_ids: linked ? [910] : [],
+    move_line_ids: [901],
+    location_id: [216, 'Subcontract'],
+    location_dest_id: [244, 'Stock'],
+  })
+  const finishedMove = () => ({
+    id: 910,
+    state: 'done',
+    picked: true,
+    production_id: [3790, 'MO'],
+    product_id: [71, 'product'],
+    quantity: 1,
+    move_dest_ids: linked ? [501] : [],
+    location_id: [214, 'Production'],
+    location_dest_id: [216, 'Subcontract'],
+  })
+  const production = {
+    id: 3790,
+    name: 'O-MID/SBC/00378',
+    state: 'done',
+    product_id: [71, 'product'],
+    product_qty: 1,
+    qty_produced: 1,
+    lot_producing_ids: [780],
+    move_finished_ids: [910],
+  }
+  const call = async (model, method, domain, options) => {
+    const id = domain?.[0]
+    if (method === 'read' && model === 'stock.picking') {
+      return [{ id: 16910, name: 'O-MID/IN/00123', state: 'assigned', date_done: false }]
+    }
+    if (method === 'read' && model === 'stock.move' && id === 501) return [receiptMove()]
+    if (method === 'read' && model === 'stock.move' && id === 910) return [finishedMove()]
+    if (method === 'read' && model === 'stock.move.line') {
+      return [{
+        id: 901,
+        state: 'assigned',
+        picked: false,
+        picking_id: [16910, 'receipt'],
+        move_id: [501, 'move'],
+        product_id: [71, 'product'],
+        quantity: 1,
+        lot_id: [780, 'STANDARD-001'],
+        location_id: [216, 'Subcontract'],
+        location_dest_id: [244, 'Stock'],
+        company_id: [11, 'Ordinaire'],
+      }]
+    }
+    if (method === 'read' && model === 'mrp.production') return [production]
+    if (method === 'read' && model === 'stock.lot') {
+      return [{ id: 780, name: 'STANDARD-001', product_id: [71, 'product'], company_id: [11, 'Ordinaire'] }]
+    }
+    if (method === 'search_read' && model === 'stock.quant') {
+      return [{ id: 700, quantity: 1, reserved_quantity: 1, company_id: [11, 'Ordinaire'] }]
+    }
+    if (method === 'search_read' && model === 'stock.move.line') {
+      return [{ id: 901, picking_id: [16910, 'receipt'], move_id: [501, 'move'], quantity: 1, picked: false }]
+    }
+    if (method === 'write' && model === 'stock.move') {
+      const command = options.positionalArgs[0][1].move_orig_ids[0]
+      linked = command[0] === 4
+      return true
+    }
+    throw new Error(`Unexpected Odoo call: ${model}.${method}`)
+  }
+  const storage = {
+    list: () => [repair],
+    save: (values) => ({ id: 1, ...values }),
+    update: (...args) => updates.push(args),
+  }
+
+  const result = await reconcileDoneMoRepairs(call, storage)
+  assert.equal(linked, false)
+  assert.deepEqual(result, { checked: 1, prepared: 1, relinked: 0 })
+  assert.deepEqual(updates, [[1, 'prepared']])
 })
 
 test('plans a guarded receipt repair when the source subcontract MO was already produced', async () => {

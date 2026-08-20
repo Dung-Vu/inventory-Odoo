@@ -113,6 +113,8 @@ app.listen(PORT, '0.0.0.0', () => {
     })
   }
   setTimeout(reconcile, 5000)
-  const repairTimer = setInterval(reconcile, 60000)
+  // Keep the window small when an operator completes a subcontract MO after
+  // lot Apply but before validating its receipt.
+  const repairTimer = setInterval(reconcile, 10000)
   repairTimer.unref()
 })

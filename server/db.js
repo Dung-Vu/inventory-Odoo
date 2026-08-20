@@ -259,7 +259,7 @@ export function updateDoneMoRepairStatus(id, status, error = null) {
 export function listPendingDoneMoRepairs() {
   return db.prepare(`
     SELECT * FROM lot_done_mo_repairs
-    WHERE status IN ('preparing', 'prepared')
+    WHERE status IN ('watching', 'preparing', 'prepared')
     ORDER BY id
   `).all();
 }

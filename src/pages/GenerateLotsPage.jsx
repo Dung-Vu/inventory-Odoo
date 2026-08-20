@@ -94,7 +94,9 @@ export default function GenerateLotsPage() {
         toast.success(
           data.total_prepared_done_mos > 0
             ? `Đã chuẩn bị ${data.total_prepared_done_mos} MO Done. Qua Odoo refresh và Validate phiếu.`
-            : `Đã tạo ${data.total_created} lot mới, đổi tên ${data.total_renamed || 0} lot nguồn và gán ${data.total_assigned} serial`
+            : data.total_watched_subcontract_mos > 0
+              ? `Đã gán serial và bật giám sát ${data.total_watched_subcontract_mos} MO nguồn để tự chuẩn bị trước Validate.`
+              : `Đã tạo ${data.total_created} lot mới, đổi tên ${data.total_renamed || 0} lot nguồn và gán ${data.total_assigned} serial`
         )
       }
     } catch (err) {

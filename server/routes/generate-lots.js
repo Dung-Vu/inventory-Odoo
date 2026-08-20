@@ -346,10 +346,10 @@ export async function resolveSubcontractAssignments(pickingId, products, call) {
         (mo) =>
           !isOneUnit(mo.product_qty) ||
           (mo.lot_producing_ids || []).length > 1 ||
+          (mo.move_finished_ids || []).length !== 1 ||
           (mo.state === "done" &&
             (!isOneUnit(mo.qty_produced) ||
               (mo.lot_producing_ids || []).length !== 1 ||
-              (mo.move_finished_ids || []).length !== 1 ||
               (mo.finished_move_line_ids || []).length !== 1))
       );
     if (invalid) {
@@ -406,6 +406,7 @@ export async function resolveSubcontractAssignments(pickingId, products, call) {
           existing_lot_id: lotId,
           existing_lot_name: lot?.name || null,
           source_mo_state: mo.state,
+          finished_move_id: mo.move_finished_ids[0],
         });
       }
       if (mo.state === "done") {
@@ -681,6 +682,39 @@ function conflict(message) {
   return error;
 }
 
+export function watchSubcontractAssignments(
+  items,
+  picking,
+  storage = { save: saveDoneMoRepair }
+) {
+  const watched = [];
+  for (const item of items) {
+    if (
+      !item.subcontract_mo_id ||
+      item.source_mo_state === "done" ||
+      !item.receipt_move_id ||
+      !item.finished_move_id ||
+      !item.id
+    ) {
+      continue;
+    }
+    watched.push(
+      storage.save({
+        picking_id: picking.id,
+        picking_name: picking.name,
+        receipt_move_id: item.receipt_move_id,
+        receipt_move_line_id: item.move_line_id,
+        finished_move_id: item.finished_move_id,
+        production_id: item.subcontract_mo_id,
+        product_id: item.product_id,
+        lot_id: item.id,
+        status: "watching",
+      })
+    );
+  }
+  return watched;
+}
+
 export async function prepareDoneMoReceiptRepair(
   repair,
   picking,
@@ -885,16 +919,24 @@ async function verifyAssignments(items, call) {
 
 let reconcilingDoneMoRepairs = false;
 
-export async function reconcileDoneMoRepairs(call = callOdooAPI) {
-  if (reconcilingDoneMoRepairs) return { checked: 0, relinked: 0 };
+export async function reconcileDoneMoRepairs(
+  call = callOdooAPI,
+  storage = {
+    list: listPendingDoneMoRepairs,
+    save: saveDoneMoRepair,
+    update: updateDoneMoRepairStatus,
+  }
+) {
+  if (reconcilingDoneMoRepairs) return { checked: 0, prepared: 0, relinked: 0 };
   reconcilingDoneMoRepairs = true;
   let checked = 0;
+  let prepared = 0;
   let relinked = 0;
   try {
-    for (const repair of listPendingDoneMoRepairs()) {
+    for (const repair of storage.list()) {
       checked += 1;
       try {
-        const [pickings, receiptMoves, receiptLines, finishedMoves] = await Promise.all([
+        const [pickings, receiptMoves, receiptLines, finishedMoves, productions] = await Promise.all([
           call("stock.picking", "read", [repair.picking_id], {
             positionalArgs: [[repair.picking_id]],
             fields: ["id", "name", "state", "date_done"],
@@ -916,19 +958,71 @@ export async function reconcileDoneMoRepairs(call = callOdooAPI) {
               "id", "state", "production_id", "product_id", "quantity", "move_dest_ids",
             ],
           }),
+          call("mrp.production", "read", [repair.production_id], {
+            positionalArgs: [[repair.production_id]],
+            fields: [
+              "id", "name", "state", "product_id", "product_qty", "qty_produced",
+              "lot_producing_ids", "move_finished_ids",
+            ],
+          }),
         ]);
         const picking = pickings?.[0];
         const receiptMove = receiptMoves?.[0];
         const receiptLine = receiptLines?.[0];
         const finishedMove = finishedMoves?.[0];
-        if (!picking || !receiptMove || !receiptLine || !finishedMove) {
-          throw new Error("Không đọc đủ record để khôi phục liên kết MO.");
+        const production = productions?.[0];
+        if (!picking || !receiptMove || !receiptLine || !finishedMove || !production) {
+          throw new Error("Không đọc đủ record để chuẩn bị/khôi phục liên kết MO.");
         }
         const alreadyLinked =
           receiptMove.move_orig_ids?.includes(repair.finished_move_id) &&
           finishedMove.move_dest_ids?.includes(repair.receipt_move_id);
+
+        if (repair.status === "watching") {
+          if (["done", "cancel"].includes(picking.state)) {
+            if (!alreadyLinked) {
+              throw new Error("Phiếu đã đóng nhưng liên kết MO bị tách ngoài repair được quản lý.");
+            }
+            storage.update(repair.id, "relinked");
+            relinked += 1;
+            continue;
+          }
+          if (!alreadyLinked) {
+            storage.update(
+              repair.id,
+              "failed",
+              "Liên kết MO bị tách trước khi hệ thống phát hiện MO Done."
+            );
+            continue;
+          }
+          if (production.state !== "done") {
+            if (production.state === "cancel") {
+              storage.update(repair.id, "failed", "MO nguồn đã bị hủy.");
+            }
+            continue;
+          }
+          await prepareDoneMoReceiptRepair(
+            {
+              product_id: repair.product_id,
+              product_name: receiptLine.product_id?.[1] || null,
+              move_line_id: repair.receipt_move_line_id,
+              receipt_move_id: repair.receipt_move_id,
+              subcontract_mo_id: repair.production_id,
+              subcontract_mo_name: production.name,
+              finished_move_id: repair.finished_move_id,
+              lot_id: repair.lot_id,
+              lot_name: receiptLine.lot_id?.[1] || null,
+            },
+            picking,
+            call,
+            { save: storage.save, update: storage.update }
+          );
+          prepared += 1;
+          continue;
+        }
+
         if (alreadyLinked) {
-          updateDoneMoRepairStatus(
+          storage.update(
             repair.id,
             picking.state === "done" ? "relinked" : "failed",
             picking.state === "done" ? null : "Liên kết MO chưa được tách; hãy Preview/Apply lại."
@@ -938,13 +1032,13 @@ export async function reconcileDoneMoRepairs(call = callOdooAPI) {
         }
         if (picking.state === "cancel") {
           await writeMoveOrigins(repair.receipt_move_id, [4, repair.finished_move_id], call);
-          updateDoneMoRepairStatus(repair.id, "relinked");
+          storage.update(repair.id, "relinked");
           relinked += 1;
           continue;
         }
         if (picking.state !== "done") {
           if (repair.status === "preparing" && !receiptMove.move_orig_ids?.length) {
-            updateDoneMoRepairStatus(repair.id, "prepared");
+            storage.update(repair.id, "prepared");
           }
           continue;
         }
@@ -978,13 +1072,13 @@ export async function reconcileDoneMoRepairs(call = callOdooAPI) {
         if (!verify?.[0]?.move_orig_ids?.includes(repair.finished_move_id)) {
           throw new Error("Odoo chưa xác nhận liên kết MO đã được khôi phục.");
         }
-        updateDoneMoRepairStatus(repair.id, "relinked");
+        storage.update(repair.id, "relinked");
         relinked += 1;
       } catch (error) {
         console.error(`[LotRepair] picking ${repair.picking_id}: ${error.message}`);
       }
     }
-    return { checked, relinked };
+    return { checked, prepared, relinked };
   } finally {
     reconcilingDoneMoRepairs = false;
   }
@@ -1056,17 +1150,22 @@ async function makePlan(pickingName, call) {
           product_name: product.product_name,
           company_id: product.company_id,
           move_line_id: line.id,
+          receipt_move_id: line.move_id,
           subcontract_mo_id: source.subcontract_mo_id,
           subcontract_mo_name: source.subcontract_mo_name,
           source_mo_state: source.source_mo_state,
+          finished_move_id: source.finished_move_id,
           prepare_done_mo: source.source_mo_state === "done",
           existing_source_lot: true,
         });
       } else if (generated) {
         lots.push({
           ...generated,
+          receipt_move_id: line.move_id,
           subcontract_mo_id: source?.subcontract_mo_id || null,
           subcontract_mo_name: source?.subcontract_mo_name || null,
+          source_mo_state: source?.source_mo_state || null,
+          finished_move_id: source?.finished_move_id || null,
         });
       }
     }
@@ -1199,6 +1298,7 @@ async function runGenerateLots(pickingName, expectedPlanHash) {
     failed.push({ ...item, error: "Odoo không xác nhận mã serial đã được ghi vào Detail." });
   }
 
+  const watchedAssignments = watchSubcontractAssignments(verified, plan.picking);
   const lotPlanLineIds = new Set(plan.lots.map((item) => item.move_line_id));
   const preparedRepairs = [];
   for (const repair of plan.doneMoRepairs) {
@@ -1260,6 +1360,7 @@ async function runGenerateLots(pickingName, expectedPlanHash) {
     total_created: createdCount,
     total_renamed: renamedCount,
     total_assigned: verified.length,
+    total_watched_subcontract_mos: watchedAssignments.length,
     total_prepared_done_mos: preparedRepairs.length,
     total_pending_lot_creation: pendingCount,
     total_failed: failed.length,
@@ -1268,9 +1369,11 @@ async function runGenerateLots(pickingName, expectedPlanHash) {
       ? `Đã điền ${verified.length} serial vào Detail, chuẩn bị ${preparedRepairs.length} MO Done; còn ${failed.length} dòng lỗi.`
       : preparedRepairs.length
         ? `Đã chuẩn hóa serial và chuẩn bị ${preparedRepairs.length} MO Done. Qua Odoo Validate phiếu; hệ thống sẽ tự khôi phục liên kết truy vết sau khi phiếu Done.`
-        : pendingCount
-          ? `Đã điền ${verified.length} serial vào Detail. ${pendingCount} lot sẽ được Odoo tạo khi Validate.`
-          : `Đã tạo và gán thành công ${verified.length} lot/serial vào Detail trên Odoo.`,
+        : watchedAssignments.length
+          ? `Đã tạo và gán ${verified.length} lot/serial. Hệ thống đang giám sát ${watchedAssignments.length} MO nguồn và sẽ tự chuẩn bị phiếu nếu MO chuyển Done trước khi Validate.`
+          : pendingCount
+            ? `Đã điền ${verified.length} serial vào Detail. ${pendingCount} lot sẽ được Odoo tạo khi Validate.`
+            : `Đã tạo và gán thành công ${verified.length} lot/serial vào Detail trên Odoo.`,
   };
   } finally {
     applyingPickings.delete(lockKey);
