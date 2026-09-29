@@ -53,6 +53,11 @@ function isOneUnit(value) {
   return Math.abs(asQuantity(value) - 1) < QTY_EPSILON;
 }
 
+function isPositiveInteger(value) {
+  const quantity = asQuantity(value);
+  return quantity > 0 && Math.abs(quantity - Math.round(quantity)) < QTY_EPSILON;
+}
+
 function moveLineQuantity(line) {
   return asQuantity(line.quantity ?? line.qty_done);
 }
@@ -670,9 +675,15 @@ export async function createAndAssignLot(item, call) {
   }
 }
 
-async function writeMoveOrigins(moveId, command, call) {
+async function writeMoveOrigins(moveId, commandOrCommands, call) {
+  const commands =
+    Array.isArray(commandOrCommands) &&
+    commandOrCommands.length > 0 &&
+    Array.isArray(commandOrCommands[0])
+      ? commandOrCommands
+      : [commandOrCommands];
   await call("stock.move", "write", [], {
-    positionalArgs: [[[moveId], { move_orig_ids: [command] }]],
+    positionalArgs: [[[moveId], { move_orig_ids: commands }]],
   });
 }
 
@@ -715,188 +726,345 @@ export function watchSubcontractAssignments(
   return watched;
 }
 
-export async function prepareDoneMoReceiptRepair(
-  repair,
+export async function prepareDoneMoReceiptRepairGroup(
+  repairs,
   picking,
   call,
   storage = {
     save: saveDoneMoRepair,
     update: updateDoneMoRepairStatus,
+    list: listPendingDoneMoRepairs,
   }
 ) {
+  if (!repairs || !repairs.length) return [];
+  const firstRepair = repairs[0];
+  const receiptMoveId = firstRepair.receipt_move_id;
+  const productId = firstRepair.product_id;
+  const expectedFinishedMoveIds = new Set(repairs.map((r) => r.finished_move_id));
+  const expectedMoveLineIds = new Set(repairs.map((r) => r.move_line_id));
+
+  const moveLineIds = [...expectedMoveLineIds];
+  const productionIds = [...new Set(repairs.map((r) => r.subcontract_mo_id))];
+  const finishedMoveIds = [...expectedFinishedMoveIds];
+  const lotIds = [...new Set(repairs.map((r) => r.lot_id))];
+
   const [receiptMoves, receiptLines, productions, finishedMoves, lots] = await Promise.all([
-    call("stock.move", "read", [repair.receipt_move_id], {
-      positionalArgs: [[repair.receipt_move_id]],
+    call("stock.move", "read", [receiptMoveId], {
+      positionalArgs: [[receiptMoveId]],
       fields: [
         "id", "state", "picked", "is_subcontract", "product_id", "quantity",
-        "purchase_line_id", "move_orig_ids", "move_line_ids", "location_id",
-        "location_dest_id",
+        "product_uom_qty", "purchase_line_id", "move_orig_ids", "move_line_ids",
+        "location_id", "location_dest_id",
       ],
     }),
-    call("stock.move.line", "read", [repair.move_line_id], {
-      positionalArgs: [[repair.move_line_id]],
+    call("stock.move.line", "read", moveLineIds, {
+      positionalArgs: [moveLineIds],
       fields: [
         "id", "state", "picked", "picking_id", "move_id", "product_id",
         "quantity", "lot_id", "location_id", "location_dest_id", "company_id",
       ],
     }),
-    call("mrp.production", "read", [repair.subcontract_mo_id], {
-      positionalArgs: [[repair.subcontract_mo_id]],
+    call("mrp.production", "read", productionIds, {
+      positionalArgs: [productionIds],
       fields: [
         "id", "name", "state", "product_id", "product_qty", "qty_produced",
         "lot_producing_ids", "move_finished_ids",
       ],
     }),
-    call("stock.move", "read", [repair.finished_move_id], {
-      positionalArgs: [[repair.finished_move_id]],
+    call("stock.move", "read", finishedMoveIds, {
+      positionalArgs: [finishedMoveIds],
       fields: [
         "id", "state", "picked", "production_id", "product_id", "quantity",
         "move_dest_ids", "location_id", "location_dest_id",
       ],
     }),
-    call("stock.lot", "read", [repair.lot_id], {
-      positionalArgs: [[repair.lot_id]],
+    call("stock.lot", "read", lotIds, {
+      positionalArgs: [lotIds],
       fields: ["id", "name", "product_id", "company_id"],
     }),
   ]);
+
   const receiptMove = receiptMoves?.[0];
-  const receiptLine = receiptLines?.[0];
-  const production = productions?.[0];
-  const finishedMove = finishedMoves?.[0];
-  const lot = lots?.[0];
-  if (
-    !receiptMove ||
-    !receiptLine ||
-    !production ||
-    !finishedMove ||
-    !lot ||
-    picking.state === "done" ||
-    receiptMove.state !== "assigned" ||
-    receiptMove.picked ||
-    !receiptMove.is_subcontract ||
-    toId(receiptMove.product_id) !== repair.product_id ||
-    !isOneUnit(receiptMove.quantity) ||
-    !receiptMove.purchase_line_id ||
-    receiptMove.move_orig_ids?.length !== 1 ||
-    receiptMove.move_orig_ids[0] !== repair.finished_move_id ||
-    !receiptMove.move_line_ids?.includes(repair.move_line_id) ||
-    receiptLine.state !== "assigned" ||
-    receiptLine.picked ||
-    toId(receiptLine.picking_id) !== picking.id ||
-    toId(receiptLine.move_id) !== repair.receipt_move_id ||
-    toId(receiptLine.product_id) !== repair.product_id ||
-    !isOneUnit(receiptLine.quantity) ||
-    toId(receiptLine.lot_id) !== repair.lot_id ||
-    production.state !== "done" ||
-    toId(production.product_id) !== repair.product_id ||
-    !isOneUnit(production.product_qty) ||
-    !isOneUnit(production.qty_produced) ||
-    production.lot_producing_ids?.length !== 1 ||
-    production.lot_producing_ids[0] !== repair.lot_id ||
-    production.move_finished_ids?.length !== 1 ||
-    production.move_finished_ids[0] !== repair.finished_move_id ||
-    finishedMove.state !== "done" ||
-    !finishedMove.picked ||
-    toId(finishedMove.production_id) !== repair.subcontract_mo_id ||
-    toId(finishedMove.product_id) !== repair.product_id ||
-    !isOneUnit(finishedMove.quantity) ||
-    !finishedMove.move_dest_ids?.includes(repair.receipt_move_id) ||
-    lot.name !== repair.lot_name ||
-    toId(lot.product_id) !== repair.product_id ||
-    toId(lot.company_id) !== toId(receiptLine.company_id)
-  ) {
+  const lineById = new Map((receiptLines || []).map((l) => [l.id, l]));
+  const productionById = new Map((productions || []).map((p) => [p.id, p]));
+  const finishedMoveById = new Map((finishedMoves || []).map((f) => [f.id, f]));
+  const lotById = new Map((lots || []).map((l) => [l.id, l]));
+
+  const receiptOrigIds = receiptMove?.move_orig_ids || [];
+  const receiptLineIds = new Set(receiptMove?.move_line_ids || []);
+  const receiptDemand = asQuantity(
+    receiptMove?.product_uom_qty != null
+      ? receiptMove.product_uom_qty
+      : receiptMove?.quantity
+  );
+
+  const pendingList = typeof storage.list === "function" ? storage.list() : [];
+  const alreadyPreparedSiblings = pendingList.filter(
+    (item) =>
+      item.picking_id === (picking.id || firstRepair.picking_id) &&
+      item.receipt_move_id === receiptMoveId &&
+      (item.status === "prepared" || item.status === "preparing") &&
+      !expectedFinishedMoveIds.has(item.finished_move_id)
+  );
+  const alreadyPreparedCount = alreadyPreparedSiblings.length;
+  const expectedDemand = repairs.length + alreadyPreparedCount;
+
+  const groupValid =
+    receiptMove &&
+    picking.state !== "done" &&
+    receiptMove.state === "assigned" &&
+    !receiptMove.picked &&
+    receiptMove.is_subcontract &&
+    toId(receiptMove.product_id) === productId &&
+    receiptMove.purchase_line_id &&
+    isPositiveInteger(receiptDemand) &&
+    receiptDemand === expectedDemand &&
+    receiptOrigIds.length === expectedFinishedMoveIds.size &&
+    receiptOrigIds.every((id) => expectedFinishedMoveIds.has(id)) &&
+    repairs.every((r) => receiptLineIds.has(r.move_line_id));
+
+  if (!groupValid) {
     throw conflict("Dữ liệu MO đã Done hoặc phiếu nhập đã thay đổi. Vui lòng Preview lại.");
   }
 
-  const sourceLocationId = toId(receiptLine.location_id);
-  const [quants, openLines] = await Promise.all([
-    call(
-      "stock.quant",
-      "search_read",
-      [
-        ["product_id", "=", repair.product_id],
-        ["lot_id", "=", repair.lot_id],
-        ["location_id", "=", sourceLocationId],
-        ["quantity", "!=", 0],
-      ],
-      ["id", "quantity", "reserved_quantity", "company_id"]
-    ),
-    call(
-      "stock.move.line",
-      "search_read",
-      [["lot_id", "=", repair.lot_id], ["state", "not in", ["done", "cancel"]]],
-      ["id", "picking_id", "move_id", "quantity", "picked"]
-    ),
-  ]);
-  if (
-    quants?.length !== 1 ||
-    !isOneUnit(quants[0].quantity) ||
-    ![0, 1].some((value) => Math.abs(asQuantity(quants[0].reserved_quantity) - value) < QTY_EPSILON) ||
-    openLines?.length !== 1 ||
-    openLines[0].id !== repair.move_line_id ||
-    toId(openLines[0].picking_id) !== picking.id ||
-    !isOneUnit(openLines[0].quantity) ||
-    openLines[0].picked
-  ) {
-    throw conflict("Tồn kho hoặc reservation của serial đã thay đổi. Không tách liên kết MO.");
+  for (const repair of repairs) {
+    const receiptLine = lineById.get(repair.move_line_id);
+    const production = productionById.get(repair.subcontract_mo_id);
+    const finishedMove = finishedMoveById.get(repair.finished_move_id);
+    const lot = lotById.get(repair.lot_id);
+
+    const repairValid =
+      receiptLine &&
+      production &&
+      finishedMove &&
+      lot &&
+      receiptLine.state === "assigned" &&
+      !receiptLine.picked &&
+      toId(receiptLine.picking_id) === picking.id &&
+      toId(receiptLine.move_id) === repair.receipt_move_id &&
+      toId(receiptLine.product_id) === repair.product_id &&
+      isOneUnit(receiptLine.quantity) &&
+      toId(receiptLine.lot_id) === repair.lot_id &&
+      production.state === "done" &&
+      toId(production.product_id) === repair.product_id &&
+      isOneUnit(production.product_qty) &&
+      isOneUnit(production.qty_produced) &&
+      production.lot_producing_ids?.length === 1 &&
+      production.lot_producing_ids[0] === repair.lot_id &&
+      production.move_finished_ids?.length === 1 &&
+      production.move_finished_ids[0] === repair.finished_move_id &&
+      finishedMove.state === "done" &&
+      finishedMove.picked &&
+      toId(finishedMove.production_id) === repair.subcontract_mo_id &&
+      toId(finishedMove.product_id) === repair.product_id &&
+      isOneUnit(finishedMove.quantity) &&
+      finishedMove.move_dest_ids?.includes(repair.receipt_move_id) &&
+      (!repair.lot_name || lot.name === repair.lot_name) &&
+      toId(lot.product_id) === repair.product_id &&
+      toId(lot.company_id) === toId(receiptLine.company_id);
+
+    if (!repairValid) {
+      throw conflict("Dữ liệu MO đã Done hoặc phiếu nhập đã thay đổi. Vui lòng Preview lại.");
+    }
   }
 
-  const record = storage.save({
-    picking_id: picking.id,
-    picking_name: picking.name,
-    receipt_move_id: repair.receipt_move_id,
-    receipt_move_line_id: repair.move_line_id,
-    finished_move_id: repair.finished_move_id,
-    production_id: repair.subcontract_mo_id,
-    product_id: repair.product_id,
-    lot_id: repair.lot_id,
-    status: "preparing",
-  });
-  let detached = false;
+  for (const repair of repairs) {
+    const receiptLine = lineById.get(repair.move_line_id);
+    const sourceLocationId = toId(receiptLine.location_id);
+    const [quants, openLines] = await Promise.all([
+      call(
+        "stock.quant",
+        "search_read",
+        [
+          ["product_id", "=", repair.product_id],
+          ["lot_id", "=", repair.lot_id],
+          ["location_id", "=", sourceLocationId],
+          ["quantity", "!=", 0],
+        ],
+        ["id", "quantity", "reserved_quantity", "company_id"]
+      ),
+      call(
+        "stock.move.line",
+        "search_read",
+        [["lot_id", "=", repair.lot_id], ["state", "not in", ["done", "cancel"]]],
+        ["id", "picking_id", "move_id", "quantity", "picked"]
+      ),
+    ]);
+
+    if (
+      quants?.length !== 1 ||
+      !isOneUnit(quants[0].quantity) ||
+      ![0, 1].some((value) => Math.abs(asQuantity(quants[0].reserved_quantity) - value) < QTY_EPSILON) ||
+      openLines?.length !== 1 ||
+      openLines[0].id !== repair.move_line_id ||
+      toId(openLines[0].picking_id) !== picking.id ||
+      !isOneUnit(openLines[0].quantity) ||
+      openLines[0].picked
+    ) {
+      throw conflict("Tồn kho hoặc reservation của serial đã thay đổi. Không tách liên kết MO.");
+    }
+  }
+
+  const records = repairs.map((repair) =>
+    storage.save({
+      picking_id: picking.id,
+      picking_name: picking.name,
+      receipt_move_id: repair.receipt_move_id,
+      receipt_move_line_id: repair.move_line_id,
+      finished_move_id: repair.finished_move_id,
+      production_id: repair.subcontract_mo_id,
+      product_id: repair.product_id,
+      lot_id: repair.lot_id,
+      status: "preparing",
+    })
+  );
+
+  const detachedFinishedMoveIds = [];
   try {
-    await writeMoveOrigins(repair.receipt_move_id, [3, repair.finished_move_id], call);
-    detached = true;
-    const [receiptAfter, finishedAfter] = await Promise.all([
-      call("stock.move", "read", [repair.receipt_move_id], {
-        positionalArgs: [[repair.receipt_move_id]],
+    if (repairs.length === 1) {
+      await writeMoveOrigins(receiptMoveId, [3, firstRepair.finished_move_id], call);
+      detachedFinishedMoveIds.push(firstRepair.finished_move_id);
+    } else {
+      const commands = repairs.map((r) => [3, r.finished_move_id]);
+      try {
+        await writeMoveOrigins(receiptMoveId, commands, call);
+        detachedFinishedMoveIds.push(...repairs.map((r) => r.finished_move_id));
+      } catch (batchErr) {
+        for (const r of repairs) {
+          await writeMoveOrigins(receiptMoveId, [3, r.finished_move_id], call);
+          detachedFinishedMoveIds.push(r.finished_move_id);
+        }
+      }
+    }
+
+    const [receiptAfterRows, finishedAfterRows] = await Promise.all([
+      call("stock.move", "read", [receiptMoveId], {
+        positionalArgs: [[receiptMoveId]],
         fields: ["id", "state", "picked", "is_subcontract", "move_orig_ids"],
       }),
-      call("stock.move", "read", [repair.finished_move_id], {
-        positionalArgs: [[repair.finished_move_id]],
+      call("stock.move", "read", finishedMoveIds, {
+        positionalArgs: [finishedMoveIds],
         fields: ["id", "state", "production_id", "move_dest_ids"],
       }),
     ]);
+
+    const receiptAfter = receiptAfterRows?.[0];
+    const finishedAfterMap = new Map((finishedAfterRows || []).map((f) => [f.id, f]));
+    const afterOrigIds = new Set(receiptAfter?.move_orig_ids || []);
+
+    const stillLinked = repairs.some((r) => afterOrigIds.has(r.finished_move_id));
+    const allFinishedValid = repairs.every((r) => {
+      const f = finishedAfterMap.get(r.finished_move_id);
+      return (
+        f &&
+        f.state === "done" &&
+        toId(f.production_id) === r.subcontract_mo_id &&
+        !f.move_dest_ids?.includes(receiptMoveId)
+      );
+    });
+
     if (
-      receiptAfter?.[0]?.state !== "assigned" ||
-      receiptAfter[0].picked ||
-      !receiptAfter[0].is_subcontract ||
-      receiptAfter[0].move_orig_ids?.length ||
-      finishedAfter?.[0]?.state !== "done" ||
-      toId(finishedAfter[0].production_id) !== repair.subcontract_mo_id ||
-      finishedAfter[0].move_dest_ids?.includes(repair.receipt_move_id)
+      !receiptAfter ||
+      receiptAfter.state !== "assigned" ||
+      receiptAfter.picked ||
+      !receiptAfter.is_subcontract ||
+      stillLinked ||
+      !allFinishedValid
     ) {
       throw conflict("Không xác nhận được việc tách tạm liên kết MO an toàn.");
     }
-    storage.update(record.id, "prepared");
-    return { ...repair, repair_id: record.id, prepared: true };
+
+    records.forEach((record) => {
+      storage.update(record.id, "prepared");
+    });
+
+    return repairs.map((repair, idx) => ({
+      ...repair,
+      repair_id: records[idx].id,
+      prepared: true,
+    }));
   } catch (error) {
-    if (detached) {
+    if (detachedFinishedMoveIds.length > 0) {
       try {
-        await writeMoveOrigins(repair.receipt_move_id, [4, repair.finished_move_id], call);
+        if (detachedFinishedMoveIds.length === 1) {
+          await writeMoveOrigins(receiptMoveId, [4, detachedFinishedMoveIds[0]], call);
+        } else {
+          const rollbackCommands = detachedFinishedMoveIds.map((id) => [4, id]);
+          try {
+            await writeMoveOrigins(receiptMoveId, rollbackCommands, call);
+          } catch (rbBatchErr) {
+            for (const finishedMoveId of detachedFinishedMoveIds) {
+              await writeMoveOrigins(receiptMoveId, [4, finishedMoveId], call);
+            }
+          }
+        }
       } catch (rollbackError) {
-        storage.update(
-          record.id,
-          "failed",
-          `${error.message}; rollback lỗi: ${rollbackError.message}`
-        );
+        records.forEach((record) => {
+          storage.update(
+            record.id,
+            "failed",
+            `${error.message}; rollback lỗi: ${rollbackError.message}`
+          );
+        });
         throw new Error(
           `Tách liên kết MO lỗi (${error.message}); rollback cũng lỗi (${rollbackError.message}).`
         );
       }
     }
-    storage.update(record.id, "failed", error.message);
+    records.forEach((record) => {
+      storage.update(record.id, "failed", error.message);
+    });
     throw error;
   }
+}
+
+export async function prepareDoneMoReceiptRepair(
+  repairOrRepairs,
+  picking,
+  call,
+  storage = {
+    save: saveDoneMoRepair,
+    update: updateDoneMoRepairStatus,
+    list: listPendingDoneMoRepairs,
+  }
+) {
+  if (Array.isArray(repairOrRepairs)) {
+    return prepareDoneMoReceiptRepairGroup(repairOrRepairs, picking, call, storage);
+  }
+
+  const repair = repairOrRepairs;
+  const pendingList = typeof storage.list === "function" ? storage.list() : [];
+  const siblings = pendingList.filter(
+    (item) =>
+      item.picking_id === (picking.id || repair.picking_id) &&
+      item.receipt_move_id === repair.receipt_move_id &&
+      item.finished_move_id !== repair.finished_move_id &&
+      item.status === "watching"
+  );
+
+  if (siblings.length === 0) {
+    const results = await prepareDoneMoReceiptRepairGroup([repair], picking, call, storage);
+    return results[0];
+  }
+
+  const group = [
+    repair,
+    ...siblings.map((s) => ({
+      product_id: s.product_id,
+      product_name: repair.product_name || null,
+      move_line_id: s.receipt_move_line_id,
+      receipt_move_id: s.receipt_move_id,
+      subcontract_mo_id: s.production_id,
+      subcontract_mo_name: null,
+      finished_move_id: s.finished_move_id,
+      lot_id: s.lot_id,
+      lot_name: null,
+      repair_id: s.id,
+    })),
+  ];
+
+  const results = await prepareDoneMoReceiptRepairGroup(group, picking, call, storage);
+  return results[0];
 }
 
 async function verifyAssignments(items, call) {
@@ -918,6 +1086,44 @@ async function verifyAssignments(items, call) {
 }
 
 let reconcilingDoneMoRepairs = false;
+let backoffDelayMs = 0;
+const INITIAL_BACKOFF_MS = 10000;
+const MAX_BACKOFF_MS = 300000; // 5 minutes
+let backoffUntil = 0;
+
+export function isReconcileBackoffActive() {
+  return Date.now() < backoffUntil;
+}
+
+export function getReconcileBackoffState() {
+  return {
+    backoffDelayMs,
+    backoffUntil,
+    active: Date.now() < backoffUntil,
+  };
+}
+
+function isRateLimitError(error) {
+  if (!error) return false;
+  if (error.response?.status === 429 || error.status === 429) return true;
+  const msg = String(error.message || "");
+  return msg.includes("status code 429") || msg.includes("429 Too Many Requests");
+}
+
+function isTransientError(error) {
+  if (!error) return false;
+  if (isRateLimitError(error)) return true;
+  const status = error.response?.status || error.status;
+  if (status >= 500 && status <= 599) return true;
+  const code = error.code;
+  if (["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EAI_AGAIN"].includes(code)) return true;
+  const msg = String(error.message || "").toLowerCase();
+  return (
+    msg.includes("timeout") ||
+    msg.includes("econnreset") ||
+    msg.includes("network error")
+  );
+}
 
 export async function reconcileDoneMoRepairs(
   call = callOdooAPI,
@@ -928,52 +1134,135 @@ export async function reconcileDoneMoRepairs(
   }
 ) {
   if (reconcilingDoneMoRepairs) return { checked: 0, prepared: 0, relinked: 0 };
+
+  const pendingList = typeof storage.list === "function" ? storage.list() : [];
+  if (!pendingList || pendingList.length === 0) {
+    backoffDelayMs = 0;
+    backoffUntil = 0;
+    return { checked: 0, prepared: 0, relinked: 0 };
+  }
+
+  if (Date.now() < backoffUntil) return { checked: 0, prepared: 0, relinked: 0 };
+
   reconcilingDoneMoRepairs = true;
   let checked = 0;
   let prepared = 0;
   let relinked = 0;
+  let sweepRateLimited = false;
+  const processedRepairIds = new Set();
+
   try {
-    for (const repair of storage.list()) {
+    for (const repair of pendingList) {
+      if (processedRepairIds.has(repair.id)) continue;
       checked += 1;
+      processedRepairIds.add(repair.id);
+
       try {
-        const [pickings, receiptMoves, receiptLines, finishedMoves, productions] = await Promise.all([
-          call("stock.picking", "read", [repair.picking_id], {
-            positionalArgs: [[repair.picking_id]],
-            fields: ["id", "name", "state", "date_done"],
-          }),
-          call("stock.move", "read", [repair.receipt_move_id], {
-            positionalArgs: [[repair.receipt_move_id]],
-            fields: [
-              "id", "state", "picked", "is_subcontract", "product_id",
-              "quantity", "move_orig_ids", "move_line_ids",
-            ],
-          }),
-          call("stock.move.line", "read", [repair.receipt_move_line_id], {
-            positionalArgs: [[repair.receipt_move_line_id]],
-            fields: ["id", "state", "move_id", "product_id", "quantity", "lot_id"],
-          }),
-          call("stock.move", "read", [repair.finished_move_id], {
-            positionalArgs: [[repair.finished_move_id]],
-            fields: [
-              "id", "state", "production_id", "product_id", "quantity", "move_dest_ids",
-            ],
-          }),
-          call("mrp.production", "read", [repair.production_id], {
-            positionalArgs: [[repair.production_id]],
-            fields: [
-              "id", "name", "state", "product_id", "product_qty", "qty_produced",
-              "lot_producing_ids", "move_finished_ids",
-            ],
-          }),
-        ]);
+        let pickings, receiptMoves, receiptLines, finishedMoves, productions;
+        try {
+          [pickings, receiptMoves, receiptLines, finishedMoves, productions] = await Promise.all([
+            call("stock.picking", "read", [repair.picking_id], {
+              positionalArgs: [[repair.picking_id]],
+              fields: ["id", "name", "state", "date_done"],
+            }),
+            call("stock.move", "read", [repair.receipt_move_id], {
+              positionalArgs: [[repair.receipt_move_id]],
+              fields: [
+                "id", "state", "picked", "is_subcontract", "product_id",
+                "quantity", "move_orig_ids", "move_line_ids",
+              ],
+            }),
+            call("stock.move.line", "read", [repair.receipt_move_line_id], {
+              positionalArgs: [[repair.receipt_move_line_id]],
+              fields: ["id", "state", "move_id", "product_id", "quantity", "lot_id"],
+            }),
+            call("stock.move", "read", [repair.finished_move_id], {
+              positionalArgs: [[repair.finished_move_id]],
+              fields: [
+                "id", "state", "production_id", "product_id", "quantity", "move_dest_ids",
+              ],
+            }),
+            call("mrp.production", "read", [repair.production_id], {
+              positionalArgs: [[repair.production_id]],
+              fields: [
+                "id", "name", "state", "product_id", "product_qty", "qty_produced",
+                "lot_producing_ids", "move_finished_ids",
+              ],
+            }),
+          ]);
+        } catch (readError) {
+          if (isRateLimitError(readError)) {
+            sweepRateLimited = true;
+            backoffDelayMs = backoffDelayMs ? Math.min(backoffDelayMs * 2, MAX_BACKOFF_MS) : INITIAL_BACKOFF_MS;
+            backoffUntil = Date.now() + backoffDelayMs;
+            console.error(
+              `[LotRepair] HTTP 429 detected on picking ${repair.picking_id}. Backing off for ${backoffDelayMs / 1000}s until ${new Date(backoffUntil).toISOString()}`
+            );
+            break;
+          }
+          if (isTransientError(readError)) {
+            console.error(
+              `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) transient error: ${readError.message}`
+            );
+            continue;
+          }
+          throw readError;
+        }
+
         const picking = pickings?.[0];
         const receiptMove = receiptMoves?.[0];
         const receiptLine = receiptLines?.[0];
         const finishedMove = finishedMoves?.[0];
         const production = productions?.[0];
+
         if (!picking || !receiptMove || !receiptLine || !finishedMove || !production) {
-          throw new Error("Không đọc đủ record để chuẩn bị/khôi phục liên kết MO.");
+          if (finishedMove && finishedMove.move_dest_ids?.length) {
+            let destMoves;
+            try {
+              destMoves = await call("stock.move", "read", finishedMove.move_dest_ids, {
+                positionalArgs: [finishedMove.move_dest_ids],
+                fields: ["id", "picking_id", "state"],
+              });
+            } catch (destReadErr) {
+              if (isRateLimitError(destReadErr)) {
+                sweepRateLimited = true;
+                backoffDelayMs = backoffDelayMs ? Math.min(backoffDelayMs * 2, MAX_BACKOFF_MS) : INITIAL_BACKOFF_MS;
+                backoffUntil = Date.now() + backoffDelayMs;
+                console.error(
+                  `[LotRepair] HTTP 429 detected on picking ${repair.picking_id}. Backing off for ${backoffDelayMs / 1000}s`
+                );
+                break;
+              }
+              console.error(
+                `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) dest-move read error: ${destReadErr.message}`
+              );
+              continue;
+            }
+
+            const manuallyRelinked = (destMoves || []).some(
+              (m) => toId(m.picking_id) === repair.picking_id && m.state === "done"
+            );
+            if (manuallyRelinked) {
+              storage.update(repair.id, "relinked");
+              relinked += 1;
+              console.log(
+                `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) -> terminal status 'relinked' (manually relinked via finished move dest_ids)`
+              );
+              continue;
+            }
+          }
+
+          storage.update(
+            repair.id,
+            "failed",
+            "Dòng nhận hàng gốc đã bị xoá hoặc sửa tay; cần kiểm tra liên kết MO thủ công."
+          );
+          console.log(
+            `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) -> terminal status 'failed': Dòng nhận hàng gốc đã bị xoá hoặc sửa tay; cần kiểm tra liên kết MO thủ công.`
+          );
+          continue;
         }
+
         const alreadyLinked =
           receiptMove.move_orig_ids?.includes(repair.finished_move_id) &&
           finishedMove.move_dest_ids?.includes(repair.receipt_move_id);
@@ -981,10 +1270,21 @@ export async function reconcileDoneMoRepairs(
         if (repair.status === "watching") {
           if (["done", "cancel"].includes(picking.state)) {
             if (!alreadyLinked) {
-              throw new Error("Phiếu đã đóng nhưng liên kết MO bị tách ngoài repair được quản lý.");
+              storage.update(
+                repair.id,
+                "failed",
+                "Phiếu đã đóng nhưng liên kết MO bị tách ngoài repair được quản lý."
+              );
+              console.log(
+                `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) -> terminal status 'failed': Phiếu đã đóng nhưng liên kết MO bị tách ngoài repair được quản lý.`
+              );
+              continue;
             }
             storage.update(repair.id, "relinked");
             relinked += 1;
+            console.log(
+              `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) -> terminal status 'relinked'`
+            );
             continue;
           }
           if (!alreadyLinked) {
@@ -993,77 +1293,188 @@ export async function reconcileDoneMoRepairs(
               "failed",
               "Liên kết MO bị tách trước khi hệ thống phát hiện MO Done."
             );
+            console.log(
+              `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) -> terminal status 'failed': Liên kết MO bị tách trước khi hệ thống phát hiện MO Done.`
+            );
             continue;
           }
           if (production.state !== "done") {
             if (production.state === "cancel") {
               storage.update(repair.id, "failed", "MO nguồn đã bị hủy.");
+              console.log(
+                `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) -> terminal status 'failed': MO nguồn đã bị hủy.`
+              );
             }
             continue;
           }
-          await prepareDoneMoReceiptRepair(
-            {
-              product_id: repair.product_id,
-              product_name: receiptLine.product_id?.[1] || null,
-              move_line_id: repair.receipt_move_line_id,
-              receipt_move_id: repair.receipt_move_id,
-              subcontract_mo_id: repair.production_id,
-              subcontract_mo_name: production.name,
-              finished_move_id: repair.finished_move_id,
-              lot_id: repair.lot_id,
-              lot_name: receiptLine.lot_id?.[1] || null,
-            },
-            picking,
-            call,
-            { save: storage.save, update: storage.update }
+
+          const siblingWatchingRepairs = pendingList.filter(
+            (item) =>
+              item.picking_id === repair.picking_id &&
+              item.receipt_move_id === repair.receipt_move_id &&
+              item.finished_move_id !== repair.finished_move_id &&
+              item.status === "watching"
           );
-          prepared += 1;
+
+          if (siblingWatchingRepairs.length > 0) {
+            const siblingProdIds = [
+              ...new Set(siblingWatchingRepairs.map((s) => s.production_id)),
+            ];
+            let siblingProductions;
+            try {
+              siblingProductions = await call("mrp.production", "read", siblingProdIds, {
+                positionalArgs: [siblingProdIds],
+                fields: ["id", "name", "state"],
+              });
+            } catch (siblingReadErr) {
+              if (isRateLimitError(siblingReadErr)) {
+                sweepRateLimited = true;
+                backoffDelayMs = backoffDelayMs ? Math.min(backoffDelayMs * 2, MAX_BACKOFF_MS) : INITIAL_BACKOFF_MS;
+                backoffUntil = Date.now() + backoffDelayMs;
+                console.error(
+                  `[LotRepair] HTTP 429 detected on picking ${repair.picking_id}. Backing off for ${backoffDelayMs / 1000}s`
+                );
+                break;
+              }
+              continue;
+            }
+
+            const siblingProdMap = new Map(
+              (siblingProductions || []).map((p) => [p.id, p])
+            );
+            const allSiblingsDone =
+              siblingProductions &&
+              siblingProductions.length === siblingProdIds.length &&
+              siblingWatchingRepairs.every((s) => {
+                const prod = siblingProdMap.get(s.production_id);
+                return prod && prod.state === "done";
+              });
+
+            if (!allSiblingsDone) {
+              continue;
+            }
+
+            const watchingGroup = [
+              {
+                product_id: repair.product_id,
+                product_name: receiptLine.product_id?.[1] || null,
+                move_line_id: repair.receipt_move_line_id,
+                receipt_move_id: repair.receipt_move_id,
+                subcontract_mo_id: repair.production_id,
+                subcontract_mo_name: production.name,
+                finished_move_id: repair.finished_move_id,
+                lot_id: repair.lot_id,
+                lot_name: receiptLine.lot_id?.[1] || null,
+                repair_id: repair.id,
+              },
+              ...siblingWatchingRepairs.map((s) => ({
+                product_id: s.product_id,
+                product_name: receiptLine.product_id?.[1] || null,
+                move_line_id: s.receipt_move_line_id,
+                receipt_move_id: s.receipt_move_id,
+                subcontract_mo_id: s.production_id,
+                subcontract_mo_name: siblingProdMap.get(s.production_id)?.name || null,
+                finished_move_id: s.finished_move_id,
+                lot_id: s.lot_id,
+                lot_name: null,
+                repair_id: s.id,
+              })),
+            ];
+
+            await prepareDoneMoReceiptRepairGroup(
+              watchingGroup,
+              picking,
+              call,
+              storage
+            );
+            prepared += watchingGroup.length;
+            watchingGroup.forEach((item) => {
+              if (item.repair_id) processedRepairIds.add(item.repair_id);
+            });
+            continue;
+          } else {
+            await prepareDoneMoReceiptRepair(
+              {
+                product_id: repair.product_id,
+                product_name: receiptLine.product_id?.[1] || null,
+                move_line_id: repair.receipt_move_line_id,
+                receipt_move_id: repair.receipt_move_id,
+                subcontract_mo_id: repair.production_id,
+                subcontract_mo_name: production.name,
+                finished_move_id: repair.finished_move_id,
+                lot_id: repair.lot_id,
+                lot_name: receiptLine.lot_id?.[1] || null,
+                repair_id: repair.id,
+              },
+              picking,
+              call,
+              storage
+            );
+            prepared += 1;
+          }
           continue;
         }
 
         if (alreadyLinked) {
-          storage.update(
-            repair.id,
-            picking.state === "done" ? "relinked" : "failed",
-            picking.state === "done" ? null : "Liên kết MO chưa được tách; hãy Preview/Apply lại."
-          );
+          const newStatus = picking.state === "done" ? "relinked" : "failed";
+          const reason = picking.state === "done" ? null : "Liên kết MO chưa được tách; hãy Preview/Apply lại.";
+          storage.update(repair.id, newStatus, reason);
           if (picking.state === "done") relinked += 1;
+          console.log(
+            `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) -> terminal status '${newStatus}'${reason ? `: ${reason}` : ""}`
+          );
           continue;
         }
+
         if (picking.state === "cancel") {
           await writeMoveOrigins(repair.receipt_move_id, [4, repair.finished_move_id], call);
           storage.update(repair.id, "relinked");
           relinked += 1;
+          console.log(
+            `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) -> terminal status 'relinked' (cancelled picking)`
+          );
           continue;
         }
+
         if (picking.state !== "done") {
-          if (repair.status === "preparing" && !receiptMove.move_orig_ids?.length) {
+          if (repair.status === "preparing" && !receiptMove.move_orig_ids?.includes(repair.finished_move_id)) {
             storage.update(repair.id, "prepared");
           }
           continue;
         }
-        if (
-          !picking.date_done ||
-          receiptMove.state !== "done" ||
-          !receiptMove.picked ||
-          !receiptMove.is_subcontract ||
-          toId(receiptMove.product_id) !== repair.product_id ||
-          !isOneUnit(receiptMove.quantity) ||
-          receiptMove.move_orig_ids?.length ||
-          !receiptMove.move_line_ids?.includes(repair.receipt_move_line_id) ||
-          receiptLine.state !== "done" ||
-          toId(receiptLine.move_id) !== repair.receipt_move_id ||
-          toId(receiptLine.product_id) !== repair.product_id ||
-          !isOneUnit(receiptLine.quantity) ||
-          toId(receiptLine.lot_id) !== repair.lot_id ||
-          finishedMove.state !== "done" ||
-          toId(finishedMove.production_id) !== repair.production_id ||
-          toId(finishedMove.product_id) !== repair.product_id ||
-          !isOneUnit(finishedMove.quantity) ||
-          finishedMove.move_dest_ids?.length
-        ) {
-          throw new Error("Phiếu đã Done nhưng dữ liệu không còn khớp snapshot repair.");
+
+        const snapshotValid =
+          Boolean(picking.date_done) &&
+          receiptMove.state === "done" &&
+          receiptMove.picked &&
+          receiptMove.is_subcontract &&
+          toId(receiptMove.product_id) === repair.product_id &&
+          isPositiveInteger(receiptMove.quantity) &&
+          !receiptMove.move_orig_ids?.includes(repair.finished_move_id) &&
+          receiptMove.move_line_ids?.includes(repair.receipt_move_line_id) &&
+          receiptLine.state === "done" &&
+          toId(receiptLine.move_id) === repair.receipt_move_id &&
+          toId(receiptLine.product_id) === repair.product_id &&
+          isOneUnit(receiptLine.quantity) &&
+          toId(receiptLine.lot_id) === repair.lot_id &&
+          finishedMove.state === "done" &&
+          toId(finishedMove.production_id) === repair.production_id &&
+          toId(finishedMove.product_id) === repair.product_id &&
+          isOneUnit(finishedMove.quantity) &&
+          !finishedMove.move_dest_ids?.length;
+
+        if (!snapshotValid) {
+          storage.update(
+            repair.id,
+            "failed",
+            "Phiếu đã Done nhưng dữ liệu không còn khớp snapshot repair."
+          );
+          console.log(
+            `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) -> terminal status 'failed': Phiếu đã Done nhưng dữ liệu không còn khớp snapshot repair.`
+          );
+          continue;
         }
+
         await writeMoveOrigins(repair.receipt_move_id, [4, repair.finished_move_id], call);
         const verify = await call("stock.move", "read", [repair.receipt_move_id], {
           positionalArgs: [[repair.receipt_move_id]],
@@ -1074,10 +1485,28 @@ export async function reconcileDoneMoRepairs(
         }
         storage.update(repair.id, "relinked");
         relinked += 1;
+        console.log(
+          `[LotRepair] repair ${repair.id} (picking ${repair.picking_id}) -> terminal status 'relinked'`
+        );
       } catch (error) {
+        if (isRateLimitError(error)) {
+          sweepRateLimited = true;
+          backoffDelayMs = backoffDelayMs ? Math.min(backoffDelayMs * 2, MAX_BACKOFF_MS) : INITIAL_BACKOFF_MS;
+          backoffUntil = Date.now() + backoffDelayMs;
+          console.error(
+            `[LotRepair] HTTP 429 detected on picking ${repair.picking_id}. Backing off for ${backoffDelayMs / 1000}s until ${new Date(backoffUntil).toISOString()}`
+          );
+          break;
+        }
         console.error(`[LotRepair] picking ${repair.picking_id}: ${error.message}`);
       }
     }
+
+    if (!sweepRateLimited) {
+      backoffDelayMs = 0;
+      backoffUntil = 0;
+    }
+
     return { checked, prepared, relinked };
   } finally {
     reconcilingDoneMoRepairs = false;
@@ -1183,6 +1612,49 @@ async function makePlan(pickingName, call) {
       code: "done_subcontract_mo_missing_serial",
       message: `MO ${repair.subcontract_mo_name} đã Done nhưng không xác định được một serial nguồn duy nhất.`,
     });
+  }
+
+  const receiptMoveIdsForDoneMos = [
+    ...new Set(doneMoRepairs.map((repair) => repair.receipt_move_id)),
+  ].sort((a, b) => a - b);
+
+  if (receiptMoveIdsForDoneMos.length > 0) {
+    const receiptMoves = await call(
+      "stock.move",
+      "search_read",
+      [["id", "in", receiptMoveIdsForDoneMos]],
+      ["id", "quantity", "product_uom_qty", "move_orig_ids", "product_id"]
+    );
+    const receiptMoveById = new Map((receiptMoves || []).map((m) => [m.id, m]));
+
+    for (const moveId of receiptMoveIdsForDoneMos) {
+      const move = receiptMoveById.get(moveId);
+      const repairsForMove = doneMoRepairs.filter((r) => r.receipt_move_id === moveId);
+      const finishedIds = new Set(repairsForMove.map((r) => r.finished_move_id));
+      const moveOrigIds = move?.move_orig_ids || [];
+      const moveDemand = asQuantity(
+        move?.product_uom_qty != null
+          ? move.product_uom_qty
+          : move?.quantity
+      );
+
+      const isMixed =
+        !move ||
+        !isPositiveInteger(moveDemand) ||
+        moveDemand !== repairsForMove.length ||
+        moveOrigIds.length !== finishedIds.size ||
+        !moveOrigIds.every((id) => finishedIds.has(id));
+
+      if (isMixed) {
+        blockingIssues.push({
+          product_id: repairsForMove[0].product_id,
+          product_name: repairsForMove[0].product_name,
+          code: "subcontract_done_mo_mixed",
+          message:
+            "Dòng nhận hàng đang nối cả MO gia công đã Done lẫn MO chưa Done (hoặc số lượng không khớp số MO). Hãy hoàn tất hoặc tách các MO còn lại trước khi Apply.",
+        });
+      }
+    }
   }
 
   return {
@@ -1301,21 +1773,41 @@ async function runGenerateLots(pickingName, expectedPlanHash) {
   const watchedAssignments = watchSubcontractAssignments(verified, plan.picking);
   const lotPlanLineIds = new Set(plan.lots.map((item) => item.move_line_id));
   const preparedRepairs = [];
+
+  const repairsByReceiptMove = new Map();
   for (const repair of plan.doneMoRepairs) {
-    if (lotPlanLineIds.has(repair.move_line_id) && !verifiedIds.has(repair.move_line_id)) {
-      failed.push({
-        ...repair,
-        name: repair.lot_name,
-        error: "Không chuẩn bị MO Done vì serial chưa được xác nhận trên Detail.",
-      });
+    if (!repairsByReceiptMove.has(repair.receipt_move_id)) {
+      repairsByReceiptMove.set(repair.receipt_move_id, []);
+    }
+    repairsByReceiptMove.get(repair.receipt_move_id).push(repair);
+  }
+
+  for (const group of repairsByReceiptMove.values()) {
+    const unverifiedRepair = group.find(
+      (r) => lotPlanLineIds.has(r.move_line_id) && !verifiedIds.has(r.move_line_id)
+    );
+    if (unverifiedRepair) {
+      for (const repair of group) {
+        failed.push({
+          ...repair,
+          name: repair.lot_name,
+          error: "Không chuẩn bị MO Done vì serial chưa được xác nhận trên Detail.",
+        });
+      }
       continue;
     }
+
     try {
-      preparedRepairs.push(
-        await prepareDoneMoReceiptRepair(repair, plan.picking, callOdooAPI)
+      const preparedGroup = await prepareDoneMoReceiptRepairGroup(
+        group,
+        plan.picking,
+        callOdooAPI
       );
+      preparedRepairs.push(...preparedGroup);
     } catch (error) {
-      failed.push({ ...repair, name: repair.lot_name, error: error.message });
+      for (const repair of group) {
+        failed.push({ ...repair, name: repair.lot_name, error: error.message });
+      }
     }
   }
 
