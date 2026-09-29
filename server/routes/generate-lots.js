@@ -758,28 +758,28 @@ export async function prepareDoneMoReceiptRepairGroup(
       ],
     }),
     call("stock.move.line", "read", moveLineIds, {
-      positionalArgs: [moveLineIds],
+      positionalArgs: [[moveLineIds]],
       fields: [
         "id", "state", "picked", "picking_id", "move_id", "product_id",
         "quantity", "lot_id", "location_id", "location_dest_id", "company_id",
       ],
     }),
     call("mrp.production", "read", productionIds, {
-      positionalArgs: [productionIds],
+      positionalArgs: [[productionIds]],
       fields: [
         "id", "name", "state", "product_id", "product_qty", "qty_produced",
         "lot_producing_ids", "move_finished_ids",
       ],
     }),
     call("stock.move", "read", finishedMoveIds, {
-      positionalArgs: [finishedMoveIds],
+      positionalArgs: [[finishedMoveIds]],
       fields: [
         "id", "state", "picked", "production_id", "product_id", "quantity",
         "move_dest_ids", "location_id", "location_dest_id",
       ],
     }),
     call("stock.lot", "read", lotIds, {
-      positionalArgs: [lotIds],
+      positionalArgs: [[lotIds]],
       fields: ["id", "name", "product_id", "company_id"],
     }),
   ]);
@@ -943,7 +943,7 @@ export async function prepareDoneMoReceiptRepairGroup(
         fields: ["id", "state", "picked", "is_subcontract", "move_orig_ids"],
       }),
       call("stock.move", "read", finishedMoveIds, {
-        positionalArgs: [finishedMoveIds],
+        positionalArgs: [[finishedMoveIds]],
         fields: ["id", "state", "production_id", "move_dest_ids"],
       }),
     ]);
@@ -1220,7 +1220,7 @@ export async function reconcileDoneMoRepairs(
             let destMoves;
             try {
               destMoves = await call("stock.move", "read", finishedMove.move_dest_ids, {
-                positionalArgs: [finishedMove.move_dest_ids],
+                positionalArgs: [[finishedMove.move_dest_ids]],
                 fields: ["id", "picking_id", "state"],
               });
             } catch (destReadErr) {
@@ -1323,7 +1323,7 @@ export async function reconcileDoneMoRepairs(
             let siblingProductions;
             try {
               siblingProductions = await call("mrp.production", "read", siblingProdIds, {
-                positionalArgs: [siblingProdIds],
+                positionalArgs: [[siblingProdIds]],
                 fields: ["id", "name", "state"],
               });
             } catch (siblingReadErr) {
