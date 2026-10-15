@@ -6,11 +6,16 @@ import {
   createAndAssignLot,
   isGeneratedLotName,
   lotSequenceNamespace,
+  makePlan,
   nextSequences,
   normalizeLotSegment,
   prepareDoneMoReceiptRepair,
+  previewResponse,
   reconcileDoneMoRepairs,
+  resolveCurrentSplitTargetMO,
   resolveSubcontractAssignments,
+  runGenerateLots,
+  verifySplitSubcontractMOs,
   watchSubcontractAssignments,
   resolveSourceDocumentCode,
   slugifyProductName,
@@ -653,4 +658,588 @@ test('uses the actual Manufacturing Order name when there is no Purchase Order',
   }
 
   assert.equal(await resolveSourceDocumentCode({ id: 43, name: 'MID/NHAN/00043' }, call), 'MO-SAN-XUAT-001')
+})
+
+function createSubcontractSplitScenario({ failOnMoveLineWriteId = null } = {}) {
+  const picking = {
+    id: 19146,
+    name: 'O-MID/IN/00464',
+    state: 'assigned',
+    origin: 'O-MH09123',
+    company_id: [11, 'Ordinaire'],
+    picking_type_id: [1, 'Receipts'],
+    scheduled_date: '2026-10-15 08:00:00',
+    purchase_id: [501, 'O-MH09123'],
+    date_done: false,
+  }
+  const moves = [
+    {
+      id: 66806,
+      picking_id: [19146, 'O-MID/IN/00464'],
+      product_id: [101, 'ORD-ARMCHAIR-MILD (LIBERTY 2)'],
+      product_uom_qty: 2,
+      quantity: 2,
+      is_subcontract: true,
+      state: 'assigned',
+      picked: false,
+      move_orig_ids: [66809],
+      move_line_ids: [63292, 63293],
+    },
+    {
+      id: 66807,
+      picking_id: [19146, 'O-MID/IN/00464'],
+      product_id: [102, 'ORD-SOFA-RELAX (FABRIC)'],
+      product_uom_qty: 1,
+      quantity: 1,
+      is_subcontract: true,
+      state: 'assigned',
+      picked: false,
+      move_orig_ids: [66808],
+      move_line_ids: [63294],
+    },
+  ]
+  const finishedMoves = new Map([
+    [
+      66809,
+      {
+        id: 66809,
+        state: 'confirmed',
+        picked: false,
+        production_id: [4149, 'O-MID/SBC/00551'],
+        product_id: [101, 'ORD-ARMCHAIR-MILD (LIBERTY 2)'],
+        quantity: 2,
+        move_dest_ids: [66806],
+      },
+    ],
+  ])
+  const moveLines = [
+    {
+      id: 63292,
+      picking_id: [19146, 'O-MID/IN/00464'],
+      product_id: [101, 'ORD-ARMCHAIR-MILD (LIBERTY 2)'],
+      move_id: [66806, 'move'],
+      state: 'assigned',
+      quantity: 1,
+      qty_done: 0,
+      lot_id: false,
+      lot_name: false,
+    },
+    {
+      id: 63293,
+      picking_id: [19146, 'O-MID/IN/00464'],
+      product_id: [101, 'ORD-ARMCHAIR-MILD (LIBERTY 2)'],
+      move_id: [66806, 'move'],
+      state: 'assigned',
+      quantity: 1,
+      qty_done: 0,
+      lot_id: false,
+      lot_name: false,
+    },
+    {
+      id: 63294,
+      picking_id: [19146, 'O-MID/IN/00464'],
+      product_id: [102, 'ORD-SOFA-RELAX (FABRIC)'],
+      move_id: [66807, 'move'],
+      state: 'assigned',
+      quantity: 1,
+      qty_done: 0,
+      lot_id: false,
+      lot_name: false,
+    },
+  ]
+  const products = [
+    {
+      id: 101,
+      name: 'ORD-ARMCHAIR-MILD (LIBERTY 2)',
+      tracking: 'serial',
+      company_id: [11, 'Ordinaire'],
+    },
+    {
+      id: 102,
+      name: 'ORD-SOFA-RELAX (FABRIC)',
+      tracking: 'none',
+      company_id: [11, 'Ordinaire'],
+    },
+  ]
+  const mos = [
+    {
+      id: 4149,
+      name: 'O-MID/SBC/00551',
+      incoming_picking: [19146, 'O-MID/IN/00464'],
+      state: 'confirmed',
+      product_id: [101, 'ORD-ARMCHAIR-MILD (LIBERTY 2)'],
+      product_qty: 2,
+      qty_produced: 0,
+      lot_producing_ids: [],
+      move_finished_ids: [66809],
+      finished_move_line_ids: [],
+    },
+    {
+      id: 4148,
+      name: 'O-MID/SBC/00550',
+      incoming_picking: [19146, 'O-MID/IN/00464'],
+      state: 'done',
+      product_id: [102, 'ORD-SOFA-RELAX (FABRIC)'],
+      product_qty: 1,
+      qty_produced: 1,
+      lot_producing_ids: [],
+      move_finished_ids: [66808],
+      finished_move_line_ids: [59999],
+    },
+  ]
+  const lots = []
+  const unlinks = []
+  let nextLotId = 9001
+  let nextMoId = 4150
+  let nextFinishedMoveId = 66810
+  let failLineId = failOnMoveLineWriteId
+
+  const call = async (model, method, domain, options) => {
+    if (model === 'stock.picking' && (method === 'search_read' || method === 'read')) {
+      return [picking]
+    }
+    if (model === 'stock.picking.type' && method === 'read') {
+      return [{ id: 1, code: 'incoming', use_create_lots: true, use_existing_lots: true }]
+    }
+    if (model === 'purchase.order' && method === 'read') {
+      return [{ id: 501, name: 'O-MH09123' }]
+    }
+    if (model === 'stock.move' && method === 'search_read') {
+      return moves
+    }
+    if (model === 'stock.move' && method === 'read') {
+      const requestedIds = Array.isArray(domain?.[0]) ? domain[0] : domain
+      return requestedIds
+        .map((id) => moves.find((m) => m.id === id) || finishedMoves.get(id))
+        .filter(Boolean)
+    }
+    if (model === 'stock.move.line' && (method === 'search_read' || method === 'read')) {
+      if (method === 'read') {
+        const requestedIds = Array.isArray(domain?.[0]) ? domain[0] : domain
+        return moveLines.filter((l) => requestedIds.includes(l.id))
+      }
+      const idDomain = (domain || []).find((clause) => Array.isArray(clause) && clause[0] === 'id')
+      if (idDomain && Array.isArray(idDomain[2])) {
+        return moveLines.filter((l) => idDomain[2].includes(l.id))
+      }
+      return moveLines
+    }
+    if (model === 'product.product' && method === 'search_read') {
+      return products
+    }
+    if (model === 'mrp.production' && method === 'search_read') {
+      const productDomain = (domain || []).find(
+        (clause) => Array.isArray(clause) && clause[0] === 'product_id'
+      )
+      const allowedProductIds = productDomain?.[2] || null
+      return mos.filter(
+        (mo) => !allowedProductIds || allowedProductIds.includes(mo.product_id[0])
+      )
+    }
+    if (model === 'mrp.production' && method === 'read') {
+      const requestedIds = Array.isArray(domain?.[0]) ? domain[0] : domain
+      return mos.filter((mo) => requestedIds.includes(mo.id))
+    }
+    if (model === 'stock.lot' && method === 'search_read') {
+      const idDomain = (domain || []).find((clause) => Array.isArray(clause) && clause[0] === 'id')
+      if (idDomain && Array.isArray(idDomain[2])) {
+        return lots.filter((l) => idDomain[2].includes(l.id))
+      }
+      return lots
+    }
+    if (model === 'stock.lot' && method === 'create') {
+      const payload = options.positionalArgs[0][0]
+      const id = nextLotId++
+      lots.push({
+        id,
+        name: payload.name,
+        product_id: [payload.product_id, 'ORD-ARMCHAIR-MILD (LIBERTY 2)'],
+        company_id: payload.company_id ? [payload.company_id, 'Ordinaire'] : false,
+      })
+      return id
+    }
+    if (model === 'stock.lot' && method === 'unlink') {
+      const ids = options.positionalArgs[0][0]
+      unlinks.push({ model: 'stock.lot', ids })
+      for (const id of ids) {
+        const index = lots.findIndex((l) => l.id === id)
+        if (index >= 0) lots.splice(index, 1)
+      }
+      return true
+    }
+    if (model === 'mrp.production' && method === 'write') {
+      const [[moIds, values]] = options.positionalArgs
+      for (const moId of moIds) {
+        const mo = mos.find((item) => item.id === moId)
+        if (!mo) throw new Error(`Unknown MO ${moId}`)
+        for (const cmd of values.lot_producing_ids || []) {
+          if (cmd[0] === 4 && !mo.lot_producing_ids.includes(cmd[1])) {
+            mo.lot_producing_ids = [...mo.lot_producing_ids, cmd[1]]
+          } else if (cmd[0] === 3) {
+            mo.lot_producing_ids = mo.lot_producing_ids.filter((id) => id !== cmd[1])
+          }
+        }
+      }
+      return true
+    }
+    if (model === 'stock.move.line' && method === 'write') {
+      const [[lineIds, values]] = options.positionalArgs
+      for (const lineId of lineIds) {
+        if (failLineId === lineId) {
+          throw new Error(`Simulated write failure on move line ${lineId}`)
+        }
+        const line = moveLines.find((item) => item.id === lineId)
+        const lot = lots.find((item) => item.id === values.lot_id)
+        line.lot_id = [lot.id, lot.name]
+
+        // Simulate Odoo mrp_subcontracting._sync_subcontracting_productions()
+        const receiptMove = moves.find((m) => m.id === line.move_id[0])
+        const siblingLines = moveLines.filter((l) => l.move_id[0] === receiptMove.id)
+        const lotlessQty = siblingLines
+          .filter((l) => !l.lot_id)
+          .reduce((sum, l) => sum + l.quantity, 0)
+        const matchedMO = mos.find((mo) => mo.lot_producing_ids?.[0] === lot.id)
+        if (matchedMO && matchedMO.product_qty > 1) {
+          matchedMO.product_qty = 1
+          const existingFinished = finishedMoves.get(matchedMO.move_finished_ids[0])
+          if (existingFinished) existingFinished.quantity = 1
+          if (lotlessQty > 0) {
+            const newMoId = nextMoId++
+            const newFinishedId = nextFinishedMoveId++
+            mos.push({
+              id: newMoId,
+              name: `${matchedMO.name}-${String(newMoId - 4148).padStart(3, '0')}`,
+              incoming_picking: [19146, 'O-MID/IN/00464'],
+              state: 'confirmed',
+              product_id: matchedMO.product_id,
+              product_qty: lotlessQty,
+              qty_produced: 0,
+              lot_producing_ids: [],
+              move_finished_ids: [newFinishedId],
+              finished_move_line_ids: [],
+            })
+            finishedMoves.set(newFinishedId, {
+              id: newFinishedId,
+              state: 'confirmed',
+              picked: false,
+              production_id: [newMoId, 'MO'],
+              product_id: matchedMO.product_id,
+              quantity: lotlessQty,
+              move_dest_ids: [receiptMove.id],
+            })
+            receiptMove.move_orig_ids = [...receiptMove.move_orig_ids, newFinishedId]
+          }
+        }
+      }
+      return true
+    }
+    throw new Error(`Unexpected Odoo call: ${model}.${method}`)
+  }
+
+  return {
+    call,
+    mos,
+    lots,
+    moves,
+    moveLines,
+    unlinks,
+    setFailLineId: (id) => {
+      failLineId = id
+    },
+  }
+}
+
+test('(a) preview of picking 19146: armchair qty-2 open MO plans 2 lots with split flag and ignores non-serial sofa', async () => {
+  const scenario = createSubcontractSplitScenario()
+  const plan = await makePlan('O-MID/IN/00464', scenario.call)
+  const preview = previewResponse(plan)
+
+  assert.equal(preview.can_apply, true)
+  assert.equal(preview.blocking_issues.length, 0)
+  assert.equal(preview.products.length, 1)
+  assert.equal(preview.products[0].product_id, 101)
+  assert.equal(preview.products[0].split_from_mo, true)
+  assert.match(
+    preview.products[0].split_note,
+    /MO O-MID\/SBC\/00551 SL 2 sẽ được Odoo tách thành 2 MO SL 1 khi gán serial/
+  )
+  assert.equal(preview.total_to_assign, 2)
+  assert.equal(preview.total_to_create, 2)
+  assert.equal(preview.total_done_mos_to_prepare, 0)
+  assert.deepEqual(
+    preview.products[0].lots.map((lot) => ({
+      name: lot.name,
+      move_line_id: lot.move_line_id,
+      split_from_mo: lot.split_from_mo,
+      subcontract_mo_name: lot.subcontract_mo_name,
+    })),
+    [
+      {
+        name: 'O-MH09123-ARMCHAIR-MILD-001',
+        move_line_id: 63292,
+        split_from_mo: true,
+        subcontract_mo_name: 'O-MID/SBC/00551',
+      },
+      {
+        name: 'O-MH09123-ARMCHAIR-MILD-002',
+        move_line_id: 63293,
+        split_from_mo: true,
+        subcontract_mo_name: 'O-MID/SBC/00551',
+      },
+    ]
+  )
+
+  const planAgain = await makePlan('O-MID/IN/00464', scenario.call)
+  assert.equal(planAgain.hash, plan.hash)
+  assert.equal(scenario.lots.length, 0)
+})
+
+test('(b) apply simulates Odoo split into 2 MOs each with 1 lot and no unlink', async () => {
+  const scenario = createSubcontractSplitScenario()
+  const savedWatches = []
+  const storage = {
+    save: (values) => {
+      const record = { id: savedWatches.length + 1, ...values }
+      savedWatches.push(record)
+      return record
+    },
+    update: () => {},
+    list: () => savedWatches,
+  }
+
+  const plan = await makePlan('O-MID/IN/00464', scenario.call)
+  const result = await runGenerateLots('O-MID/IN/00464', plan.hash, scenario.call, storage)
+
+  assert.equal(result.applied, true)
+  assert.equal(result.total_failed, 0)
+  assert.equal(result.total_created, 2)
+  assert.equal(result.total_assigned, 2)
+  assert.equal(result.total_prepared_done_mos, 0)
+  assert.equal(result.total_watched_subcontract_mos, 2)
+  assert.equal(scenario.unlinks.length, 0)
+
+  const armchairMOs = scenario.mos.filter((mo) => mo.product_id[0] === 101)
+  assert.equal(armchairMOs.length, 2)
+  assert.deepEqual(
+    armchairMOs.map((mo) => ({
+      id: mo.id,
+      product_qty: mo.product_qty,
+      lot_producing_ids: mo.lot_producing_ids,
+    })),
+    [
+      { id: 4149, product_qty: 1, lot_producing_ids: [9001] },
+      { id: 4150, product_qty: 1, lot_producing_ids: [9002] },
+    ]
+  )
+
+  assert.equal(savedWatches.length, 2)
+  assert.deepEqual(
+    savedWatches.map((w) => ({
+      production_id: w.production_id,
+      finished_move_id: w.finished_move_id,
+      lot_id: w.lot_id,
+      status: w.status,
+    })),
+    [
+      { production_id: 4149, finished_move_id: 66809, lot_id: 9001, status: 'watching' },
+      { production_id: 4150, finished_move_id: 66810, lot_id: 9002, status: 'watching' },
+    ]
+  )
+
+  const reconcileResult = await reconcileDoneMoRepairs(scenario.call, storage)
+  assert.deepEqual(reconcileResult, { checked: 2, prepared: 0, relinked: 0 })
+})
+
+test('(c) Done subcontract MO with product_qty 2 remains blocked', async () => {
+  const call = async (model) => {
+    if (model === 'mrp.production') {
+      return [{
+        id: 4149,
+        name: 'O-MID/SBC/00551',
+        state: 'done',
+        product_id: [101, 'ORD-ARMCHAIR-MILD (LIBERTY 2)'],
+        product_qty: 2,
+        qty_produced: 2,
+        lot_producing_ids: [],
+        move_finished_ids: [66809],
+        finished_move_line_ids: [70001, 70002],
+      }]
+    }
+    throw new Error(`Unexpected Odoo model: ${model}`)
+  }
+
+  const { byMoveLine, blockingIssues, doneMoRepairs } = await resolveSubcontractAssignments(
+    19146,
+    [{
+      product_id: 101,
+      product_name: 'ORD-ARMCHAIR-MILD (LIBERTY 2)',
+      is_subcontract: true,
+      plannable_lines: [
+        { id: 63292, move_id: 66806, quantity: 1 },
+        { id: 63293, move_id: 66806, quantity: 1 },
+      ],
+    }],
+    call
+  )
+
+  assert.equal(byMoveLine.size, 0)
+  assert.equal(doneMoRepairs.length, 0)
+  assert.equal(blockingIssues.length, 1)
+  assert.equal(blockingIssues[0].code, 'subcontract_source_mo_mismatch')
+})
+
+test('(d) two lot-less open subcontract MOs with qty > 1 for the same product are blocked', async () => {
+  const call = async (model) => {
+    if (model === 'mrp.production') {
+      return [
+        {
+          id: 4149,
+          name: 'O-MID/SBC/00551',
+          state: 'confirmed',
+          product_id: [101, 'ORD-ARMCHAIR-MILD (LIBERTY 2)'],
+          product_qty: 2,
+          qty_produced: 0,
+          lot_producing_ids: [],
+          move_finished_ids: [66809],
+        },
+        {
+          id: 4150,
+          name: 'O-MID/SBC/00552',
+          state: 'confirmed',
+          product_id: [101, 'ORD-ARMCHAIR-MILD (LIBERTY 2)'],
+          product_qty: 2,
+          qty_produced: 0,
+          lot_producing_ids: [],
+          move_finished_ids: [66810],
+        },
+      ]
+    }
+    throw new Error(`Unexpected Odoo model: ${model}`)
+  }
+
+  const { byMoveLine, blockingIssues } = await resolveSubcontractAssignments(
+    19146,
+    [{
+      product_id: 101,
+      product_name: 'ORD-ARMCHAIR-MILD (LIBERTY 2)',
+      is_subcontract: true,
+      plannable_lines: [
+        { id: 63292, move_id: 66806, quantity: 1 },
+        { id: 63293, move_id: 66806, quantity: 1 },
+        { id: 63294, move_id: 66806, quantity: 1 },
+        { id: 63295, move_id: 66806, quantity: 1 },
+      ],
+    }],
+    call
+  )
+
+  assert.equal(byMoveLine.size, 0)
+  assert.equal(blockingIssues.length, 1)
+  assert.equal(blockingIssues[0].code, 'subcontract_source_mo_mismatch')
+})
+
+test('(e) partial failure on 2nd line leaves state plannable via qty-1 path on next preview', async () => {
+  const scenario = createSubcontractSplitScenario({ failOnMoveLineWriteId: 63293 })
+  const savedWatches = []
+  const storage = {
+    save: (values) => {
+      const record = { id: savedWatches.length + 1, ...values }
+      savedWatches.push(record)
+      return record
+    },
+    update: () => {},
+    list: () => savedWatches,
+  }
+
+  const firstPlan = await makePlan('O-MID/IN/00464', scenario.call)
+  const firstApply = await runGenerateLots(
+    'O-MID/IN/00464',
+    firstPlan.hash,
+    scenario.call,
+    storage
+  )
+
+  assert.equal(firstApply.total_assigned, 1)
+  assert.equal(firstApply.total_failed, 1)
+  assert.equal(firstApply.products[0].lots.length, 1)
+  assert.equal(firstApply.products[0].lots[0].move_line_id, 63292)
+  assert.equal(firstApply.products[0].failed.length, 1)
+  assert.equal(firstApply.products[0].failed[0].move_line_id, 63293)
+
+  // Now clear the simulated error and run the next Preview
+  scenario.setFailLineId(null)
+  const secondPlan = await makePlan('O-MID/IN/00464', scenario.call)
+  const secondPreview = previewResponse(secondPlan)
+
+  assert.equal(secondPreview.can_apply, true)
+  assert.equal(secondPreview.blocking_issues.length, 0)
+  assert.equal(secondPreview.total_to_assign, 1)
+  assert.equal(secondPreview.total_skipped, 1)
+  assert.equal(secondPreview.products[0].split_from_mo, false)
+  assert.equal(secondPreview.products[0].lots.length, 1)
+  assert.equal(secondPreview.products[0].lots[0].move_line_id, 63293)
+  assert.equal(secondPreview.products[0].lots[0].split_from_mo, false)
+  assert.equal(secondPreview.products[0].lots[0].name, 'O-MH09123-ARMCHAIR-MILD-002')
+
+  const secondApply = await runGenerateLots(
+    'O-MID/IN/00464',
+    secondPlan.hash,
+    scenario.call,
+    storage
+  )
+  assert.equal(secondApply.total_failed, 0)
+  assert.equal(secondApply.total_assigned, 1)
+})
+
+test('throws 409 Preview lại when first split item target MO no longer matches expected state or qty', async () => {
+  const scenario = createSubcontractSplitScenario()
+  const plan = await makePlan('O-MID/IN/00464', scenario.call)
+
+  // Mutate target MO qty after Preview
+  scenario.mos[0].product_qty = 3
+
+  await assert.rejects(
+    async () => {
+      await createAndAssignLot(plan.lots[0], scenario.call)
+    },
+    (error) => {
+      assert.equal(error.status, 409)
+      assert.match(error.message, /Preview lại/)
+      return true
+    }
+  )
+})
+
+test('reports post-apply verification mismatch in splitFailed when MO qty is not shrunk to 1', async () => {
+  const call = async (model) => {
+    if (model === 'mrp.production') {
+      return [{
+        id: 4149,
+        name: 'O-MID/SBC/00551',
+        state: 'confirmed',
+        product_id: [101, 'ORD-ARMCHAIR-MILD (LIBERTY 2)'],
+        product_qty: 2,
+        qty_produced: 0,
+        lot_producing_ids: [9001],
+        move_finished_ids: [66809],
+      }]
+    }
+    throw new Error(`Unexpected Odoo model: ${model}`)
+  }
+
+  const { verified, splitFailed } = await verifySplitSubcontractMOs(
+    [{
+      id: 9001,
+      name: 'O-MH09123-ARMCHAIR-MILD-001',
+      product_id: 101,
+      move_line_id: 63292,
+      split_from_mo: true,
+    }],
+    19146,
+    call
+  )
+
+  assert.equal(verified.length, 0)
+  assert.equal(splitFailed.length, 1)
+  assert.equal(splitFailed[0].move_line_id, 63292)
 })
