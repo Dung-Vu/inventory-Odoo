@@ -22,6 +22,7 @@ console.log(`Loading env from: ${envPath}`)
 // Now import other modules after env vars are loaded
 import express from 'express'
 import cors from 'cors'
+import { reportBasicAuth } from './report-auth.js'
 import apiRoutes from './routes/api.js'
 import qcRoutes from './routes/qc.js'
 import generateLotsRoutes, { reconcileDoneMoRepairs, isReconcileBackoffActive } from './routes/generate-lots.js'
@@ -66,6 +67,7 @@ app.get('/health', (req, res) => {
 })
 
 // API routes
+app.use('/api/abc-analysis', reportBasicAuth())
 app.use('/api', apiRoutes)
 app.use('/api', qcRoutes)
 app.use('/api', generateLotsRoutes)

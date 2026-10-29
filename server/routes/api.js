@@ -1,6 +1,12 @@
 import express from "express";
 import ExcelJS from "exceljs";
 import { callOdooAPI, getOdooConfig } from "../odoo-helper.js";
+import {
+  assignAbcClasses,
+  isValidDateString,
+  summarizeAbc,
+  vnDateRangeToUtc,
+} from "../abc-report.js";
 
 // Note: Environment variables are already loaded in server/index.js
 // We can access them directly via process.env
@@ -1068,11 +1074,6 @@ router.get("/abc-analysis", async (req, res, next) => {
       return res.status(500).json({ error: "Server configuration error" });
     }
 
-    // Helper function to format percentage
-    const formatPercent = (value) => {
-      return (value || 0).toFixed(2);
-    };
-
     // Parse query params
     const { startDate, endDate, productName } = req.query;
     const variantTag = (req.query.variantTag || "Furniture Stock").trim();
@@ -1080,9 +1081,15 @@ router.get("/abc-analysis", async (req, res, next) => {
     console.log(`[Sales Report] Params: startDate=${startDate}, endDate=${endDate}, productName=${productName}, variantTag=${variantTag}`);
 
     // Validate date range
+    if ((startDate && !isValidDateString(startDate)) || (endDate && !isValidDateString(endDate))) {
+      return res.status(400).json({ error: "Ngày không hợp lệ (định dạng YYYY-MM-DD)" });
+    }
     if (startDate && endDate && startDate > endDate) {
       return res.status(400).json({ error: "Ngày bắt đầu phải nhỏ hơn hoặc bằng ngày kết thúc" });
     }
+
+    // Users pick Vietnam calendar days; Odoo stores datetimes in UTC.
+    const utcRange = vnDateRangeToUtc(startDate, endDate);
 
     const isStockFabricsReport = variantTag.toLowerCase() === "stock fabrics";
     const fetchSaleOrderLines = async (domain, fields, logLabel) => {
@@ -1144,20 +1151,33 @@ router.get("/abc-analysis", async (req, res, next) => {
     // newer variants (not yet tagged) are also included in the sales calculation.
     console.log(`[Sales Report] Step 2: Fetching products with tag "${variantTag}" (ID: ${variantTagId})...`);
 
-    const productsWithTag = [];
-    
-    try {
-      // Fetch tagged product variants with attribute values and pricing for display
-      const taggedProducts = await callOdooAPI(
-        'product.product',
-        'search_read',
-        [['all_product_tag_ids', 'in', [variantTagId]]],
-        ['id', 'name', 'default_code', 'company_id', 'product_tmpl_id', 'product_template_attribute_value_ids', 'lst_price', 'standard_price']
-      );
-      
-      productsWithTag.push(...taggedProducts);
-    } catch (tagErr) {
-      console.warn(`[Sales Report] Could not fetch products with tag:`, tagErr.message);
+    // Fetch tagged product variants with attribute values and pricing for display.
+    // Errors propagate: an empty report must never hide a failed Odoo call.
+    const productsWithTag = await callOdooAPI(
+      'product.product',
+      'search_read',
+      [['all_product_tag_ids', 'in', [variantTagId]]],
+      ['id', 'name', 'default_code', 'company_id', 'product_tmpl_id', 'product_template_attribute_value_ids', 'lst_price', 'standard_price']
+    );
+
+    // standard_price is company-dependent: read each variant's cost in its own
+    // company context, otherwise variants of other companies come back as 0.
+    if (isStockFabricsReport) {
+      const idsByCompany = {};
+      productsWithTag.forEach((v) => {
+        const companyId = v.company_id?.[0];
+        if (companyId) (idsByCompany[companyId] ||= []).push(v.id);
+      });
+      const costById = {};
+      for (const [companyId, ids] of Object.entries(idsByCompany)) {
+        const rows = await callOdooAPI('product.product', 'read', null, {
+          positionalArgs: [[ids], { fields: ['standard_price'], context: { allowed_company_ids: [Number(companyId)] } }],
+        });
+        rows.forEach((r) => { costById[r.id] = r.standard_price; });
+      }
+      productsWithTag.forEach((v) => {
+        if (costById[v.id] !== undefined) v.standard_price = costById[v.id];
+      });
     }
 
     console.log(`[Sales Report] Found ${productsWithTag.length} tagged variants for tag "${variantTag}"`);
@@ -1203,8 +1223,17 @@ router.get("/abc-analysis", async (req, res, next) => {
         .filter(Boolean)
         .join(', ');
       const companyName = variant.company_id?.[1] || null;
-      // Use lst_price if available, fallback to standard_price (cost)
-      const unitPrice = (variant.lst_price > 0 ? variant.lst_price : variant.standard_price) || 0;
+      // Furniture: lst_price, fallback to cost.
+      // Fabrics: consumption is valued at cost (fallback lst_price, flagged) so
+      // every variant is ranked on the same price basis.
+      let unitPrice;
+      let priceSource;
+      if (isStockFabricsReport) {
+        unitPrice = variant.standard_price > 0 ? variant.standard_price : (variant.lst_price || 0);
+        priceSource = variant.standard_price > 0 ? 'cost' : variant.lst_price > 0 ? 'list' : 'none';
+      } else {
+        unitPrice = (variant.lst_price > 0 ? variant.lst_price : variant.standard_price) || 0;
+      }
 
       productMap[variant.id] = {
         id: variant.id,
@@ -1213,9 +1242,13 @@ router.get("/abc-analysis", async (req, res, next) => {
         default_code: variant.default_code || 'N/A',
         variant: variantAttrs || null,
         unit_price: unitPrice,
+        price_source: priceSource,
         total_sales: 0,
         quantity_sold: 0,
+        quantity_direct: 0,
         quantity_in_mo: 0,
+        quantity_returned: 0,
+        direct_revenue: 0,
         company: companyName || 'N/A',
         _companyNames: companyName ? [companyName] : [],
         odoo_url: tmplId ? `${odooBaseUrl}/odoo/inventory/products/${tmplId}` : null,
@@ -1237,11 +1270,11 @@ router.get("/abc-analysis", async (req, res, next) => {
     ];
 
     // Push date range into Odoo domain to avoid post-fetch filtering
-    if (startDate) {
-      saleDomain.push(["order_id.date_order", ">=", startDate + " 00:00:00"]);
+    if (utcRange.start) {
+      saleDomain.push(["order_id.date_order", ">=", utcRange.start]);
     }
-    if (endDate) {
-      saleDomain.push(["order_id.date_order", "<=", endDate + " 23:59:59"]);
+    if (utcRange.end) {
+      saleDomain.push(["order_id.date_order", "<=", utcRange.end]);
     }
 
     const saleLineFields = [
@@ -1252,12 +1285,7 @@ router.get("/abc-analysis", async (req, res, next) => {
       "company_id",
     ];
 
-    let allSaleLines = [];
-    try {
-      allSaleLines = await fetchSaleOrderLines(saleDomain, saleLineFields, "All variants of tagged templates");
-    } catch (err) {
-      console.warn("[Sales Report] Could not fetch sale lines:", err.message);
-    }
+    const allSaleLines = await fetchSaleOrderLines(saleDomain, saleLineFields, "All variants of tagged templates");
 
     console.log(`[Sales Report] Found ${allSaleLines.length} valid sale order lines`);
 
@@ -1281,6 +1309,8 @@ router.get("/abc-analysis", async (req, res, next) => {
 
       // Don't accumulate total_sales here — it will be recalculated as qty * unit_price after all quantities are collected
       productMap[variantId].quantity_sold += qty;
+      productMap[variantId].quantity_direct += qty;
+      productMap[variantId].direct_revenue += line.price_subtotal || 0;
 
       const lineCompany = line.company_id?.[1];
       if (lineCompany && !productMap[variantId]._companyNames.includes(lineCompany)) {
@@ -1298,20 +1328,20 @@ router.get("/abc-analysis", async (req, res, next) => {
     // Fabric variants are used as BOM components in production orders.
     // We count done stock.moves linked to an MO and add the qty to quantity_sold.
     console.log('[Sales Report] Step 3b: Fetching MO consumption (stock.move)...');
-    try {
+    {
       const moveDomain = [
         ['product_id', 'in', allVariantIds],
         ['state', '=', 'done'],
         ['raw_material_production_id', '!=', false],
       ];
-      if (startDate) moveDomain.push(['date', '>=', startDate + ' 00:00:00']);
-      if (endDate) moveDomain.push(['date', '<=', endDate + ' 23:59:59']);
+      if (utcRange.start) moveDomain.push(['date', '>=', utcRange.start]);
+      if (utcRange.end) moveDomain.push(['date', '<=', utcRange.end]);
 
       // Paginate stock.move separately (fetchSaleOrderLines is hardcoded to sale.order.line)
       const moMoves = [];
       for (let offset = 0; ; offset += 1000) {
         const batch = await callOdooAPI('stock.move', 'search_read', moveDomain, {
-          fields: ['id', 'product_id', 'product_uom_qty', 'company_id'],
+          fields: ['id', 'product_id', 'product_uom_qty', 'quantity', 'company_id'],
           offset,
           limit: 1000,
         });
@@ -1322,7 +1352,8 @@ router.get("/abc-analysis", async (req, res, next) => {
 
       moMoves.forEach((move) => {
         const variantId = move.product_id?.[0];
-        const qty = move.product_uom_qty || 0;
+        // `quantity` is the actually consumed qty on a done move; product_uom_qty is the demand.
+        const qty = move.quantity ?? move.product_uom_qty ?? 0;
         if (!variantId || !productMap[variantId] || qty <= 0) return;
 
         productMap[variantId].quantity_in_mo += qty;
@@ -1335,11 +1366,51 @@ router.get("/abc-analysis", async (req, res, next) => {
       });
 
       console.log(`[Sales Report] Added ${moMoves.length} MO consumption moves`);
-    } catch (moErr) {
-      console.warn('[Sales Report] Could not fetch MO consumption:', moErr.message);
     }
 
-    // Step 3c: Recalculate total_sales = total quantity consumed × unit price
+    // Step 3c (fabrics): subtract customer returns of sold lines. Only returns
+    // linked to a sale line are deducted, because deliveries without a sale line
+    // were never counted as consumption in the first place.
+    if (isStockFabricsReport) {
+      const returnDomain = [
+        ['product_id', 'in', allVariantIds],
+        ['state', '=', 'done'],
+        ['location_id.usage', '=', 'customer'],
+        ['location_dest_id.usage', '=', 'internal'],
+        ['sale_line_id', '!=', false],
+      ];
+      if (utcRange.start) returnDomain.push(['date', '>=', utcRange.start]);
+      if (utcRange.end) returnDomain.push(['date', '<=', utcRange.end]);
+
+      const returnMoves = await callOdooAPI('stock.move', 'search_read', returnDomain, {
+        fields: ['id', 'product_id', 'quantity', 'sale_line_id'],
+      });
+
+      const returnLineIds = [...new Set(returnMoves.map((m) => m.sale_line_id?.[0]).filter(Boolean))];
+      const netUnitPriceByLine = {};
+      if (returnLineIds.length > 0) {
+        const returnLines = await callOdooAPI('sale.order.line', 'read', null, {
+          positionalArgs: [[returnLineIds], { fields: ['product_uom_qty', 'price_subtotal'] }],
+        });
+        returnLines.forEach((l) => {
+          netUnitPriceByLine[l.id] = l.product_uom_qty > 0 ? l.price_subtotal / l.product_uom_qty : 0;
+        });
+      }
+
+      returnMoves.forEach((move) => {
+        const variantId = move.product_id?.[0];
+        const qty = move.quantity || 0;
+        if (!variantId || !productMap[variantId] || qty <= 0) return;
+        const product = productMap[variantId];
+        product.quantity_returned += qty;
+        product.quantity_sold -= qty;
+        product.direct_revenue -= qty * (netUnitPriceByLine[move.sale_line_id[0]] || 0);
+      });
+
+      console.log(`[Sales Report] Subtracted ${returnMoves.length} customer return moves`);
+    }
+
+    // Step 3d: Value = net quantity consumed × unit price
     Object.values(productMap).forEach((p) => {
       p.total_sales = p.quantity_sold * p.unit_price;
     });
@@ -1351,12 +1422,15 @@ router.get("/abc-analysis", async (req, res, next) => {
       delete product._companyNames;
     });
 
-    // Step 4: Filter by product name if provided
+    // Step 4: Classify ABC on the full product set, so searching by name only
+    // narrows the displayed rows and never changes a product's class.
     let filteredProducts = isStockFabricsReport
       ? Object.values(productMap)
       : Object.values(productMap).filter(
           (product) => (product.total_sales || 0) > 0 || (product.quantity_sold || 0) > 0
         );
+
+    assignAbcClasses(filteredProducts, 'total_sales');
 
     if (productName) {
       const searchTerm = productName.toLowerCase();
@@ -1370,74 +1444,17 @@ router.get("/abc-analysis", async (req, res, next) => {
       console.log(`[Sales Report] Filtered to ${filteredProducts.length} products by name "${productName}"`);
     }
 
-    // Step 5: Sort by total_sales descending
-    filteredProducts.sort((a, b) => b.total_sales - a.total_sales);
+    const summary = summarizeAbc(filteredProducts, 'total_sales');
+    if (isStockFabricsReport) {
+      summary.totalDirectRevenue = filteredProducts.reduce((sum, p) => sum + p.direct_revenue, 0);
+      summary.missingCostCount = filteredProducts.filter((p) => p.price_source !== 'cost').length;
+    }
 
-    // Step 6: Calculate total revenue
-    const totalRevenue = filteredProducts.reduce((sum, p) => sum + p.total_sales, 0);
-
-    console.log(`[Sales Report] Total products after filter: ${filteredProducts.length}, Total revenue: ${totalRevenue.toFixed(0)} VND`);
-
-    // Step 7: Calculate cumulative percentage
-    // PHÂN LOẠI ABC THEO DOANH SỐ (Pareto 80/15/5):
-    // - Class A: Những sản phẩm có cumulative revenue ≤ 80% (top ~20% sản phẩm)
-    // - Class B: Những sản phẩm có cumulative revenue từ 80% đến 95% (next ~30% sản phẩm)
-    // - Class C: Những sản phẩm còn lại (bottom ~50% sản phẩm)
-    let cumulativeSales = 0;
-    filteredProducts.forEach((product, index) => {
-      cumulativeSales += product.total_sales;
-      product.cumulative_percent = totalRevenue > 0 ? (cumulativeSales / totalRevenue) * 100 : 0;
-      product.rank = index + 1;
-      product.sales_percent = totalRevenue > 0 ? (product.total_sales / totalRevenue) * 100 : 0;
-    });
-
-    // Step 8: Assign ABC class based on CUMULATIVE REVENUE (Pareto Principle)
-    let classA_revenue = 0, classB_revenue = 0, classC_revenue = 0;
-    let classA_count = 0, classB_count = 0, classC_count = 0;
-
-    filteredProducts.forEach((product) => {
-      // Class A: cumulative ≤ 80%
-      if (product.cumulative_percent <= 80) {
-        product.abc_class = 'A';
-        classA_revenue += product.total_sales;
-        classA_count++;
-      }
-      // Class B: cumulative > 80% and ≤ 95%
-      else if (product.cumulative_percent <= 95) {
-        product.abc_class = 'B';
-        classB_revenue += product.total_sales;
-        classB_count++;
-      }
-      // Class C: cumulative > 95%
-      else {
-        product.abc_class = 'C';
-        classC_revenue += product.total_sales;
-        classC_count++;
-      }
-    });
-
-    const totalProducts = filteredProducts.length;
-
-    console.log(`[Sales Report] Class A: ${classA_count} products (${formatPercent((classA_revenue / totalRevenue) * 100)} revenue)`);
-    console.log(`[Sales Report] Class B: ${classB_count} products (${formatPercent((classB_revenue / totalRevenue) * 100)} revenue)`);
-    console.log(`[Sales Report] Class C: ${classC_count} products (${formatPercent((classC_revenue / totalRevenue) * 100)} revenue)`);
-    console.log(`[Sales Report] Total: ${totalProducts} products, Total Revenue: ${totalRevenue.toFixed(0)} VND`);
+    console.log(`[Sales Report] Total: ${summary.totalProducts} products, Total value: ${summary.totalRevenue.toFixed(0)} VND`);
 
     res.json({
       products: filteredProducts,
-      summary: {
-        totalProducts,
-        totalRevenue,
-        classA_count: classA_count,
-        classB_count: classB_count,
-        classC_count: classC_count,
-        classA_revenue,
-        classB_revenue,
-        classC_revenue,
-        classA_percent: totalRevenue > 0 ? (classA_revenue / totalRevenue) * 100 : 0,
-        classB_percent: totalRevenue > 0 ? (classB_revenue / totalRevenue) * 100 : 0,
-        classC_percent: totalRevenue > 0 ? (classC_revenue / totalRevenue) * 100 : 0,
-      },
+      summary,
       filters: {
         startDate,
         endDate,
@@ -1454,7 +1471,9 @@ router.get("/abc-analysis", async (req, res, next) => {
     if (error.message.includes("ECONNREFUSED") || error.message.includes("ENOTFOUND")) {
       return res.status(503).json({ error: "Không thể kết nối đến Odoo server" });
     }
-    next(error);
+    return res.status(502).json({
+      error: "Không lấy được đủ dữ liệu từ Odoo nên chưa thể tính báo cáo. Vui lòng thử lại sau ít phút.",
+    });
   }
 });
 
