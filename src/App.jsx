@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom'
 import HomePage from './pages/HomePage'
 import RecipientInfoPage from './pages/RecipientInfoPage'
 import ABCAnalysisPage from './pages/ABCAnalysisPage'
@@ -6,11 +6,19 @@ import QcSearchPage from './pages/QcSearchPage'
 import QcListPage from './pages/QcListPage'
 import QcDetailPage from './pages/QcDetailPage'
 import GenerateLotsPage from './pages/GenerateLotsPage'
+import LoginPage from './pages/LoginPage'
+import UserBadge from './components/UserBadge'
+
+function SessionBadge() {
+  return useLocation().pathname === '/login' ? null : <UserBadge />
+}
 
 function App() {
   return (
     <Router>
+      <SessionBadge />
       <Routes>
+        <Route path="/login" element={<LoginPage />} />
         <Route path="/" element={<HomePage />} />
         <Route path="/recipient-info" element={<RecipientInfoPage />} />
         <Route

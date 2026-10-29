@@ -2,8 +2,19 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Toaster } from 'react-hot-toast'
+import axios from 'axios'
 import App from './App.jsx'
+import { redirectToLogin } from './services/authApi'
 import './index.css'
+
+// Any API call answered 401 means the app session is gone: send the user to /login.
+axios.interceptors.response.use(undefined, (error) => {
+  const url = error.config?.url || ''
+  if (error.response?.status === 401 && !/\/auth\/(login|totp|logout)/.test(url)) {
+    redirectToLogin()
+  }
+  return Promise.reject(error)
+})
 
 const queryClient = new QueryClient({
   defaultOptions: {

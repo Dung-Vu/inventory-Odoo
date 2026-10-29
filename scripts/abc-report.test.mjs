@@ -6,7 +6,6 @@ import {
   summarizeAbc,
   vnDateRangeToUtc,
 } from '../server/abc-report.js'
-import { reportBasicAuth } from '../server/report-auth.js'
 
 test('vnDateRangeToUtc shifts Vietnam calendar days to UTC bounds', () => {
   assert.deepEqual(vnDateRangeToUtc('2026-09-01', '2026-09-30'), {
@@ -62,24 +61,4 @@ test('summarizeAbc totals by class', () => {
   assert.equal(s.totalRevenue, 100)
   assert.deepEqual([s.classA_count, s.classB_count, s.classC_count], [1, 1, 1])
   assert.equal(s.classB_percent, 15)
-})
-
-function runAuth(env, authorization) {
-  let status = 200
-  let nextCalled = false
-  const res = { set() {}, status(code) { status = code; return this }, json() { return this } }
-  reportBasicAuth(env)({ headers: authorization ? { authorization } : {} }, res, () => { nextCalled = true })
-  return { status, nextCalled }
-}
-
-test('reportBasicAuth is a no-op when not configured', () => {
-  assert.equal(runAuth({}).nextCalled, true)
-})
-
-test('reportBasicAuth rejects missing or wrong credentials and accepts correct ones', () => {
-  const env = { REPORT_AUTH_USER: 'bao', REPORT_AUTH_PASSWORD: 'p:ss' }
-  const basic = (u, p) => 'Basic ' + Buffer.from(`${u}:${p}`).toString('base64')
-  assert.equal(runAuth(env).status, 401)
-  assert.equal(runAuth(env, basic('bao', 'wrong')).status, 401)
-  assert.equal(runAuth(env, basic('bao', 'p:ss')).nextCalled, true)
 })
