@@ -62,3 +62,21 @@ test('summarizeAbc totals by class', () => {
   assert.deepEqual([s.classA_count, s.classB_count, s.classC_count], [1, 1, 1])
   assert.equal(s.classB_percent, 15)
 })
+
+test('fabric Excel export writes one row per product plus a total row', async () => {
+  const { default: ExcelJS } = await import('exceljs')
+  const { buildFabricReportWorkbook } = await import('../src/utils/fabricReportExcel.js')
+  const products = [
+    { rank: 1, abc_class: 'A', name: 'F-ORD-LANA', default_code: 'N/A', company: 'Ordinaire', quantity_direct: 10, quantity_in_mo: 5, quantity_returned: 1, quantity_sold: 14, unit_price: 150000, price_source: 'cost', total_sales: 2100000, direct_revenue: 3600000, sales_percent: 70, cumulative_percent: 70 },
+    { rank: 2, abc_class: 'B', name: 'F-BON-X', company: 'Bonario', quantity_in_mo: 3, quantity_sold: 3, unit_price: 300000, price_source: 'list', total_sales: 900000, sales_percent: 30, cumulative_percent: 100 },
+  ]
+  const workbook = await buildFabricReportWorkbook(ExcelJS, { products, summary: { totalRevenue: 3000000, totalDirectRevenue: 3600000 }, startDate: '2026-09-01', endDate: '2026-09-30' })
+  const reread = new ExcelJS.Workbook()
+  await reread.xlsx.load(await workbook.xlsx.writeBuffer())
+  const sheet = reread.getWorksheet('Tiêu thụ vải')
+  assert.match(sheet.getCell('A2').value, /2026-09-01 → 2026-09-30/)
+  assert.equal(sheet.getCell('M5').value, 'Giá trị tiêu thụ (đ)')
+  assert.deepEqual([sheet.getCell('C6').value, sheet.getCell('E6').value, sheet.getCell('J6').value, sheet.getCell('M6').value], ['F-ORD-LANA', '', 14, 2100000])
+  assert.equal(sheet.getCell('L7').value, 'Giá niêm yết (thiếu giá vốn)')
+  assert.deepEqual([sheet.getCell('C8').value, sheet.getCell('J8').value, sheet.getCell('M8').value, sheet.getCell('N8').value], ['Tổng', 17, 3000000, 3600000])
+})
