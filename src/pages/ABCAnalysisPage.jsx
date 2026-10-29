@@ -4,6 +4,7 @@ import { FileSpreadsheet, Loader2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { fetchABCAnalysis, exportABCAnalysisExcel } from '../services/api'
 import LoadingSpinner from '../components/LoadingSpinner'
+import { exportFabricReportExcel } from '../utils/fabricReportExcel'
 import Card from '../components/ui/Card'
 import Button from '../components/ui/Button'
 
@@ -68,6 +69,19 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
     try {
       setExporting(true)
       toast.loading('Đang trích xuất dữ liệu và tạo file Excel...', { id: 'export-excel' })
+      if (isStockFabricsReport) {
+        if (!data?.products?.length) throw new Error('Chưa có dữ liệu để xuất')
+        await exportFabricReportExcel({
+          products: getFilteredProducts(),
+          summary: data.summary,
+          startDate: data.filters?.startDate,
+          endDate: data.filters?.endDate,
+          productName: data.filters?.productName,
+          filterClass,
+        })
+        toast.success('Xuất file Excel thành công!', { id: 'export-excel' })
+        return
+      }
       await exportABCAnalysisExcel({
         startDate: startDate || undefined,
         endDate: endDate || undefined,
@@ -164,7 +178,6 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
             </div>
           </div>
 
-          {!isStockFabricsReport && (
           <div className="flex items-center gap-2">
             <button
               onClick={handleExportExcel}
@@ -176,10 +189,15 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
               ) : (
                 <FileSpreadsheet className="w-4 h-4" />
               )}
-              <span>{exporting ? 'Đang xuất file...' : 'Xuất Excel Đồ Gỗ & Ghế (Full Reorder)'}</span>
+              <span>
+                {exporting
+                  ? 'Đang xuất file...'
+                  : isStockFabricsReport
+                    ? 'Xuất Excel Tiêu Thụ Vải'
+                    : 'Xuất Excel Đồ Gỗ & Ghế (Full Reorder)'}
+              </span>
             </button>
           </div>
-          )}
         </div>
 
         {data?.summary && (
@@ -319,7 +337,6 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
             <Button type="button" variant="secondary" onClick={handleReset}>
               Reset
             </Button>
-            {!isStockFabricsReport && (
             <button
               type="button"
               onClick={handleExportExcel}
@@ -333,7 +350,6 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
               )}
               <span>Xuất Excel</span>
             </button>
-            )}
           </form>
 
           <div className="flex gap-2 mt-4 border-t pt-4">
