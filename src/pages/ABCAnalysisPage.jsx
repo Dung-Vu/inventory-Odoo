@@ -125,6 +125,7 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
   }
 
   const isStockFabricsReport = variantTag === 'Stock fabrics'
+  const valueLabel = isStockFabricsReport ? 'giá trị tiêu thụ' : null
 
   const emptyMessage =
     data?.message || `Không tìm thấy sản phẩm nào với variant tag "${variantTag}".`
@@ -156,13 +157,14 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
               </h1>
               <p className="text-sm text-gray-500">
                 {isStockFabricsReport
-                  ? 'Theo dõi số mét vải bán trực tiếp và doanh số tương ứng của chính các line vải'
+                  ? 'Phân loại ABC theo giá trị vải tiêu thụ (bán trực tiếp + dùng cho sản xuất) và theo dõi doanh thu bán trực tiếp'
                   : 'Theo dõi và phân tích doanh số sản phẩm & tính toán Reorder'}
               </p>
               <p className="text-xs text-purple-600 font-medium mt-1">Variant tag: {variantTag}</p>
             </div>
           </div>
 
+          {!isStockFabricsReport && (
           <div className="flex items-center gap-2">
             <button
               onClick={handleExportExcel}
@@ -177,6 +179,7 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
               <span>{exporting ? 'Đang xuất file...' : 'Xuất Excel Đồ Gỗ & Ghế (Full Reorder)'}</span>
             </button>
           </div>
+          )}
         </div>
 
         {data?.summary && (
@@ -187,7 +190,7 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
                 <p className="text-2xl font-bold text-purple-600">{data.summary.totalProducts}</p>
               </div>
               <div className="bg-white/90 backdrop-blur rounded-xl p-4 shadow-sm border border-green-100">
-                <p className="text-xs text-gray-500 uppercase tracking-wide">Tổng doanh số</p>
+                <p className="text-xs text-gray-500 uppercase tracking-wide">{valueLabel ? `Tổng ${valueLabel}` : 'Tổng doanh số'}</p>
                 <p className="text-lg font-bold text-green-600 truncate" title={formatCurrency(data.summary.totalRevenue)}>
                   {formatCurrency(data.summary.totalRevenue)}
                 </p>
@@ -200,10 +203,21 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
                 </div>
               </div>
               <div className="bg-white/90 backdrop-blur rounded-xl p-4 shadow-sm border border-blue-100">
-                <p className="text-xs text-gray-500 uppercase tracking-wide">Doanh số Class A</p>
-                <p className="text-lg font-bold text-blue-600 truncate" title={formatCurrency(data.summary.classA_revenue)}>
-                  {formatCurrency(data.summary.classA_revenue)}
-                </p>
+                {isStockFabricsReport ? (
+                  <>
+                    <p className="text-xs text-gray-500 uppercase tracking-wide">Doanh thu bán trực tiếp</p>
+                    <p className="text-lg font-bold text-blue-600 truncate" title={formatCurrency(data.summary.totalDirectRevenue || 0)}>
+                      {formatCurrency(data.summary.totalDirectRevenue || 0)}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-xs text-gray-500 uppercase tracking-wide">Doanh số Class A</p>
+                    <p className="text-lg font-bold text-blue-600 truncate" title={formatCurrency(data.summary.classA_revenue)}>
+                      {formatCurrency(data.summary.classA_revenue)}
+                    </p>
+                  </>
+                )}
               </div>
             </div>
 
@@ -212,15 +226,15 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
               <div className="flex flex-wrap gap-4 text-sm">
                 <div className="flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-red-500 text-white text-xs font-bold flex items-center justify-center">A</span>
-                  <span>Top 20% sản phẩm, ~80% doanh số</span>
+                  <span>{`Top 20% sản phẩm, ~80% ${valueLabel || 'doanh số'}`}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-amber-500 text-white text-xs font-bold flex items-center justify-center">B</span>
-                  <span>20-50% sản phẩm, ~15% doanh số</span>
+                  <span>{`20-50% sản phẩm, ~15% ${valueLabel || 'doanh số'}`}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-gray-400 text-white text-xs font-bold flex items-center justify-center">C</span>
-                  <span>50% sản phẩm còn lại, ~5% doanh số</span>
+                  <span>{`50% sản phẩm còn lại, ~5% ${valueLabel || 'doanh số'}`}</span>
                 </div>
               </div>
             </div>
@@ -232,12 +246,23 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
                 </svg>
                 <div className="flex-1 text-xs text-blue-800">
                   <p className="font-semibold mb-1">📊 Độ chính xác dữ liệu:</p>
-                  <ul className="space-y-1 text-blue-700">
-                    <li>• <strong>SL bán:</strong> Tổng số mét tiêu thụ = <strong>bán trực tiếp</strong> (sale.order.line) + <strong>dùng trong sản xuất</strong> (stock.move từ MO)</li>
-                    <li>• <strong>Doanh số:</strong> Doanh thu thuần từ <code className="bg-blue-100 px-1 rounded">price_subtotal</code> chỉ tính đơn bán trực tiếp, chưa VAT</li>
-                    <li>• <strong>Lọc theo ngày:</strong> Dùng <code className="bg-blue-100 px-1 rounded">date_order</code> cho đơn bán và <code className="bg-blue-100 px-1 rounded">date</code> cho MO move</li>
-                    <li>• <strong>Hiển thị:</strong> Mỗi dòng là một <strong>product variant</strong> được gán tag — hiển thị đủ 65 variant</li>
-                  </ul>
+                  {isStockFabricsReport ? (
+                    <ul className="space-y-1 text-blue-700">
+                      <li>• <strong>SL tiêu thụ:</strong> số mét <strong>bán trực tiếp</strong> + <strong>dùng cho sản xuất</strong> (gồm gia công), trừ <strong>hàng khách trả lại</strong> của đơn bán</li>
+                      <li>• <strong>Giá trị tiêu thụ:</strong> SL tiêu thụ × <strong>giá vốn</strong> của mã vải (theo công ty sở hữu mã). Dùng để xếp hạng ABC, <strong>không phải doanh thu</strong></li>
+                      <li>• <strong>Doanh thu bán trực tiếp:</strong> tiền trên đơn bán đã xác nhận, chưa VAT, đã trừ hàng trả lại; không tính vải dùng cho sản xuất</li>
+                      <li>• <strong>Lọc theo ngày:</strong> theo giờ Việt Nam — ngày đặt hàng cho đơn bán, ngày hoàn tất cho xuất sản xuất và trả hàng</li>
+                      {data.summary.missingCostCount > 0 && (
+                        <li className="text-amber-700">• <strong>{data.summary.missingCostCount} mã chưa có giá vốn</strong> trên Odoo (đánh dấu ⚠) — tạm tính theo giá bán niêm yết, nên cập nhật giá vốn để xếp hạng chính xác</li>
+                      )}
+                    </ul>
+                  ) : (
+                    <ul className="space-y-1 text-blue-700">
+                      <li>• <strong>SL bán:</strong> số lượng trên đơn bán đã xác nhận (cộng thêm số lượng dùng làm nguyên liệu sản xuất nếu có)</li>
+                      <li>• <strong>Doanh số:</strong> SL bán × giá bán niêm yết của sản phẩm (không có giá niêm yết thì dùng giá vốn)</li>
+                      <li>• <strong>Lọc theo ngày:</strong> theo giờ Việt Nam, dựa trên ngày đặt hàng</li>
+                    </ul>
+                  )}
                 </div>
               </div>
             </div>
@@ -283,7 +308,7 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
                 onChange={(e) => setQuantitySort(e.target.value)}
                 className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-400 bg-white"
               >
-                <option value="default">Mặc định: Doanh số giảm dần</option>
+                <option value="default">{`Mặc định: ${isStockFabricsReport ? 'Giá trị tiêu thụ' : 'Doanh số'} giảm dần`}</option>
                 <option value="desc">SL bán giảm dần</option>
                 <option value="asc">SL bán tăng dần</option>
               </select>
@@ -294,6 +319,7 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
             <Button type="button" variant="secondary" onClick={handleReset}>
               Reset
             </Button>
+            {!isStockFabricsReport && (
             <button
               type="button"
               onClick={handleExportExcel}
@@ -307,6 +333,7 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
               )}
               <span>Xuất Excel</span>
             </button>
+            )}
           </form>
 
           <div className="flex gap-2 mt-4 border-t pt-4">
@@ -355,7 +382,12 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
                   <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">
                     {isStockFabricsReport ? 'SL Tiêu Thụ (m)' : 'SL Bán'}
                   </th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">Doanh Số</th>
+                  <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">
+                    {isStockFabricsReport ? 'Giá Trị Tiêu Thụ' : 'Doanh Số'}
+                  </th>
+                  {isStockFabricsReport && (
+                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">Doanh Thu Bán TT</th>
+                  )}
                   <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">%</th>
                   <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase">Tích Lũy</th>
                 </tr>
@@ -363,7 +395,7 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
               <tbody className="divide-y divide-gray-100">
                 {getFilteredProducts().map((product, index) => (
                   <tr key={product.id} className="hover:bg-gray-50/50 transition-colors">
-                    <td className="px-4 py-3 text-sm text-gray-500">{index + 1}</td>
+                    <td className="px-4 py-3 text-sm text-gray-500">{product.rank ?? index + 1}</td>
                     <td className="px-4 py-3">
                       <span
                         className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold text-white ${
@@ -381,11 +413,12 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <p className="text-sm font-medium text-gray-800">{product.product_name || product.name}</p>
-                          {product.variant ? (
+                          {product.variant && (
                             <p className="text-xs text-purple-600 font-medium">{product.variant}</p>
-                          ) : product.default_code && product.default_code !== 'N/A' ? (
+                          )}
+                          {product.default_code && product.default_code !== 'N/A' && (
                             <p className="text-xs text-gray-400 font-mono">{product.default_code}</p>
-                          ) : null}
+                          )}
                         </div>
                         {product.odoo_url && (
                           <a
@@ -409,14 +442,16 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
                       {isStockFabricsReport ? (
                         <div>
                           <span className="font-medium">{formatQuantity(product.quantity_sold)} m</span>
-                          {(product.quantity_in_mo > 0 || product.quantity_sold > product.quantity_in_mo) && (
-                            <div className="text-xs text-gray-400 mt-0.5">
-                              {product.quantity_sold - (product.quantity_in_mo || 0) > 0 && (
-                                <span className="text-green-600">↑{formatQuantity(product.quantity_sold - (product.quantity_in_mo || 0))} bán</span>
+                          {(product.quantity_direct > 0 || product.quantity_in_mo > 0 || product.quantity_returned > 0) && (
+                            <div className="text-xs text-gray-400 mt-0.5 space-x-1">
+                              {product.quantity_direct > 0 && (
+                                <span className="text-green-600">{formatQuantity(product.quantity_direct)} bán</span>
                               )}
-                              {product.quantity_in_mo > 0 && product.quantity_sold - (product.quantity_in_mo || 0) > 0 && ' + '}
                               {product.quantity_in_mo > 0 && (
-                                <span className="text-blue-500">{formatQuantity(product.quantity_in_mo)} SX</span>
+                                <span className="text-blue-500">+{formatQuantity(product.quantity_in_mo)} SX</span>
+                              )}
+                              {product.quantity_returned > 0 && (
+                                <span className="text-red-500">−{formatQuantity(product.quantity_returned)} trả</span>
                               )}
                             </div>
                           )}
@@ -427,7 +462,15 @@ function ABCAnalysisPage({ pageTitle, variantTag }) {
                     </td>
                     <td className="px-4 py-3 text-right text-sm font-semibold text-green-600">
                       {formatCurrency(product.total_sales)}
+                      {isStockFabricsReport && product.price_source !== 'cost' && (
+                        <span className="ml-1 text-amber-500" title="Mã chưa có giá vốn trên Odoo, tạm tính theo giá bán niêm yết">⚠</span>
+                      )}
                     </td>
+                    {isStockFabricsReport && (
+                      <td className="px-4 py-3 text-right text-sm text-gray-700">
+                        {product.direct_revenue ? formatCurrency(product.direct_revenue) : '—'}
+                      </td>
+                    )}
                     <td className="px-4 py-3 text-right text-sm text-gray-600">
                       {formatPercent(product.sales_percent)}
                     </td>
