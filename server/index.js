@@ -22,7 +22,11 @@ console.log(`Loading env from: ${envPath}`)
 // Now import other modules after env vars are loaded
 import express from 'express'
 import cors from 'cors'
-import { reportBasicAuth } from './report-auth.js'
+import db from './db.js'
+import { callOdooAPI } from './odoo-helper.js'
+import { createAuth } from './auth/index.js'
+import { createOdooWebLogin, odooBaseUrl } from './auth/odoo-web-login.js'
+import { createSessionStore } from './auth/sessions.js'
 import apiRoutes from './routes/api.js'
 import qcRoutes from './routes/qc.js'
 import generateLotsRoutes, { reconcileDoneMoRepairs, isReconcileBackoffActive } from './routes/generate-lots.js'
@@ -39,17 +43,36 @@ const app = express()
 const PORT = parseInt(process.env.PORT || '5005', 10)
 const isProduction = process.env.NODE_ENV === 'production'
 
+// Behind the Cloudflare tunnel / reverse proxy: needed for secure cookies and client IPs.
+app.set('trust proxy', process.env.TRUST_PROXY || 'loopback, linklocal, uniquelocal')
+
 // Middleware
+// Production is same-origin (frontend served by this server), so no CORS there.
 app.use(cors({
-  origin: isProduction ? true : (process.env.FRONTEND_URL || 'http://localhost:3000'),
+  origin: isProduction ? false : (process.env.FRONTEND_URL || 'http://localhost:3000'),
   credentials: true
 }))
 app.use(express.json())
 
+// Odoo account login (password + 2FA) gating the whole app, including static pages.
+const sessions = createSessionStore(db)
+const auth = createAuth({
+  sessions,
+  webLogin: createOdooWebLogin({ baseUrl: odooBaseUrl(process.env.ODOO_URL), db: process.env.ODOO_DB }),
+  getUser: async (uid) => {
+    const [user] = await callOdooAPI('res.users', 'read', null, {
+      positionalArgs: [[uid], { fields: ['name', 'login', 'active', 'share'], context: { active_test: false } }]
+    })
+    return user || null
+  }
+})
+app.use('/api/auth', auth.router)
+app.use(auth.gate)
+
 // Serve static files in production
 if (isProduction) {
   const distPath = join(__dirname, '..', 'dist')
-  app.use(express.static(distPath))
+  app.use(express.static(distPath, { index: false }))
   console.log('Serving static files from:', distPath)
 }
 
@@ -67,7 +90,6 @@ app.get('/health', (req, res) => {
 })
 
 // API routes
-app.use('/api/abc-analysis', reportBasicAuth())
 app.use('/api', apiRoutes)
 app.use('/api', qcRoutes)
 app.use('/api', generateLotsRoutes)
@@ -107,6 +129,16 @@ app.listen(PORT, '0.0.0.0', () => {
       console.error('[LotRepair] reconciliation failed:', error.message)
     })
   }
+  const purgeSessions = () => {
+    try {
+      sessions.purgeExpired()
+    } catch (error) {
+      console.error('[Auth] session purge failed:', error.message)
+    }
+  }
+  purgeSessions()
+  setInterval(purgeSessions, 60 * 60 * 1000).unref()
+
   setTimeout(reconcile, 5000)
   // Keep the window small when an operator completes a subcontract MO after
   // lot Apply but before validating its receipt.
